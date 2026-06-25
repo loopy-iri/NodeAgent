@@ -63,6 +63,13 @@ Give the customer:
 > ```
 > The response has `grpc_address`, `protocol`, `cert_pem` and `inbounds`. The customer key is not included (shown only at creation).
 
+### 🔗 Public subscription link (give it to the customer)
+Every subscription has a **public link**: `https://PANEL/sub/<TOKEN>`. Copy it from the "Customer connection" button (or at subscription creation) and send it to the customer. Opening it (no admin token needed) shows:
+- The node's inbound config to paste into their panel's core + gRPC address + certificate (with copy buttons)
+- **Quota** status (used/remaining) and **expiry** date
+
+The token is returned as `sub_token` in the subscription-create response and in `GET /subscriptions/{id}/connection`.
+
 The customer adds the node in their own PasarGuard panel → [Connect from PasarGuard](05-Customer-Connect-EN).
 
 ## Viewing/sharing the core config
