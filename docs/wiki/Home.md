@@ -33,6 +33,7 @@
 
 ## از کجا شروع کنم؟
 - اپراتور: [نصب پنل](02-Install-Panel) → [نصب نود](03-Install-Node) → [افزودن نود و فروش](04-Add-Node-And-Sell)
+- تنظیم هسته‌ی Xray نود (فروشنده): [تنظیم هسته](10-Configure-Core)
 - مشتری: [اتصال از پنل PasarGuard](05-Customer-Connect)
 - استفاده‌ی شخصی هم‌زمان با فروش: [استفاده‌ی شخصی](06-Personal-Use)
 - نگهداری/آپدیت: [آپدیت و نگهداری](07-Update-Maintenance)

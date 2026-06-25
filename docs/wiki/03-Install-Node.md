@@ -43,6 +43,8 @@ Node certificate (paste into the main panel when adding the node):
 - ویرایش محلی: `sudo pg-node-agent edit` (سپس `restart`).
 - یا از پنل اصلی push کن: `PUT /api/v1/nodes/{id}/config`.
 
+> 📌 **راهنمای کامل تنظیم هسته (نمونه‌ی Reality/WS، تولید کلید، چه چیزی به مشتری بده):** [تنظیم هسته‌ی نود](10-Configure-Core).
+
 > **مهم:** هر inbound در این کانفیگ که می‌خواهی کاربرهای مشتری رویش بنشینند باید تگش در `--force-inbounds` باشد و تنظیماتش (port/SNI/شبکه) را به مشتری بدهی تا لینک‌های کاربر نهایی کار کنند.
 
 ## دستورهای مدیریتی

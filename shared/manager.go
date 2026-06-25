@@ -14,10 +14,13 @@ package shared
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"strings"
 	"sync"
+
+	"golang.org/x/crypto/curve25519"
 
 	"github.com/pasarguard/node/backend/xray"
 	"github.com/pasarguard/node/common"
@@ -225,13 +228,59 @@ func (m *Manager) SharableInbounds() (string, error) {
 			keep = filtered
 		}
 	}
+	// Redact node secrets (e.g. the Reality private key) and surface the public
+	// key the customer needs to build client links.
+	redacted := make([]json.RawMessage, 0, len(keep))
+	for _, ib := range keep {
+		redacted = append(redacted, redactInboundSecrets(ib))
+	}
 	out, err := json.Marshal(struct {
 		Inbounds []json.RawMessage `json:"inbounds"`
-	}{Inbounds: keep})
+	}{Inbounds: redacted})
 	if err != nil {
 		return "", err
 	}
 	return string(out), nil
+}
+
+// redactInboundSecrets removes server-only secrets from an inbound definition
+// before sharing it with a customer. For Reality it strips privateKey and adds
+// the derived publicKey (which clients need). Unparseable input is returned
+// unchanged.
+func redactInboundSecrets(raw json.RawMessage) json.RawMessage {
+	var m map[string]any
+	if err := json.Unmarshal(raw, &m); err != nil {
+		return raw
+	}
+	if ss, ok := m["streamSettings"].(map[string]any); ok {
+		if rs, ok := ss["realitySettings"].(map[string]any); ok {
+			if pk, ok := rs["privateKey"].(string); ok && pk != "" {
+				if pub, ok := realityPublicKey(pk); ok {
+					rs["publicKey"] = pub
+				}
+				delete(rs, "privateKey")
+			}
+		}
+	}
+	out, err := json.Marshal(m)
+	if err != nil {
+		return raw
+	}
+	return out
+}
+
+// realityPublicKey derives the X25519 public key (base64 raw-url) from a Reality
+// private key as produced by `xray x25519`.
+func realityPublicKey(privB64 string) (string, bool) {
+	priv, err := base64.RawURLEncoding.DecodeString(strings.TrimRight(privB64, "="))
+	if err != nil || len(priv) != 32 {
+		return "", false
+	}
+	pub, err := curve25519.X25519(priv, curve25519.Basepoint)
+	if err != nil {
+		return "", false
+	}
+	return base64.RawURLEncoding.EncodeToString(pub), true
 }
 
 // Stop shuts the shared core down.

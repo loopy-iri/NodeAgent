@@ -2,6 +2,7 @@ package shared
 
 import (
 	"encoding/json"
+	"strings"
 	"testing"
 )
 
@@ -49,5 +50,30 @@ func TestSharableInbounds(t *testing.T) {
 	m3 := &Manager{}
 	if out3, err := m3.SharableInbounds(); err != nil || out3 != `{"inbounds":[]}` {
 		t.Fatalf("empty config: got %q err %v", out3, err)
+	}
+}
+
+func TestSharableInboundsRedactsRealityPrivateKey(t *testing.T) {
+	// A valid X25519 private key (base64 raw-url) and its expected public key.
+	priv := "WMHfHKQjPbTNbeKr0PmCvFjyhZjUbqI0c5q3oRZ7Ykg"
+	wantPub, ok := realityPublicKey(priv)
+	if !ok {
+		t.Fatal("could not derive public key from test private key")
+	}
+
+	cfg := `{"inbounds":[{"tag":"vless-in","port":443,"protocol":"vless",
+		"streamSettings":{"network":"tcp","security":"reality",
+		"realitySettings":{"serverNames":["www.microsoft.com"],"privateKey":"` + priv + `","shortIds":["ab"]}}}]}`
+
+	m := &Manager{config: cfg}
+	out, err := m.SharableInbounds()
+	if err != nil {
+		t.Fatalf("SharableInbounds: %v", err)
+	}
+	if strings.Contains(out, priv) {
+		t.Fatalf("private key leaked in shared inbounds: %s", out)
+	}
+	if !strings.Contains(out, wantPub) {
+		t.Fatalf("expected derived public key %q in output: %s", wantPub, out)
 	}
 }
