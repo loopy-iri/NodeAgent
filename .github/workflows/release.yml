@@ -1,0 +1,50 @@
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+          - { goarch: amd64, suffix: amd64 }
+          - { goarch: arm64, suffix: arm64 }
+          - { goarch: arm, goarm: "7", suffix: armv7 }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: Build agent
+        env:
+          CGO_ENABLED: "0"
+          GOOS: linux
+          GOARCH: ${{ matrix.goarch }}
+          GOARM: ${{ matrix.goarm }}
+        run: |
+          go build -trimpath -ldflags "-s -w" -o pg-node-agent ./cmd/agent
+          tar czf "pg-node-agent_linux_${{ matrix.suffix }}.tar.gz" pg-node-agent
+      - uses: actions/upload-artifact@v4
+        with:
+          name: pg-node-agent_linux_${{ matrix.suffix }}
+          path: "pg-node-agent_linux_${{ matrix.suffix }}.tar.gz"
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          pattern: "pg-node-agent_*"
+          merge-multiple: true
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*.tar.gz
+          generate_release_notes: true

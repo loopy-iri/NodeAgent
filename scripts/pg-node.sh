@@ -2,27 +2,27 @@
 #
 # pg-node.sh — installer/manager for the PasarGuard multi-tenant node agent (fork).
 #
-# This is NOT compatible with the upstream PasarGuard node; it manages the
-# shared-core, multi-tenant agent (HTTP control plane + optional PasarGuard-compat
-# gRPC for core config). It is self-contained (no external shared libs).
+# Installs a PREBUILT binary (per CPU arch) from GitHub Releases + Xray-core and
+# runs it as a systemd service — no Docker, no on-server compilation.
 #
-# One-line install (after hosting this repo):
+# One-line install:
 #   sudo bash -c "$(curl -sL https://raw.githubusercontent.com/loopy-iri/NodeAgent/main/scripts/pg-node.sh)" @ install
 #
 set -euo pipefail
 
 # ---------- globals ----------
 APP_NAME="${APP_NAME:-pg-node}"
-INSTALL_DIR="/opt"
-APP_DIR="${APP_DIR:-$INSTALL_DIR/$APP_NAME}"
-DATA_DIR="${DATA_DIR:-/var/lib/$APP_NAME}"
+GH_REPO="${GH_REPO:-loopy-iri/NodeAgent}"
+BIN_NAME="pg-node-agent"
+BIN_PATH="/usr/local/bin/$BIN_NAME"
+APP_DIR="/opt/$APP_NAME"
+DATA_DIR="/var/lib/$APP_NAME"
 ENV_FILE="$APP_DIR/.env"
-COMPOSE_FILE="$APP_DIR/docker-compose.agent.yml"
+SERVICE_UNIT="/etc/systemd/system/$APP_NAME.service"
 SSL_CERT_FILE="$DATA_DIR/certs/ssl_cert.pem"
 SSL_KEY_FILE="$DATA_DIR/certs/ssl_key.pem"
 FIXED_CONFIG_FILE="$DATA_DIR/fixed-config.json"
-REPO_URL="${REPO_URL:-https://github.com/loopy-iri/NodeAgent.git}"   # this fork's repo
-COMPOSE=""
+XRAY_DIR="$DATA_DIR/xray-core"
 
 # ---------- helpers ----------
 colorized_echo() {
@@ -34,11 +34,10 @@ colorized_echo() {
     printf "\033[1;%sm%s\033[0m\n" "$code" "$text"
 }
 die() { colorized_echo red "$1"; exit 1; }
-
 check_root() { [ "$(id -u)" -eq 0 ] || die "This command must run as root (use sudo)."; }
+require_systemd() { command -v systemctl >/dev/null 2>&1 || die "systemd (systemctl) is required."; }
 
 detect_os() {
-    if [ -r /etc/os-release ]; then . /etc/os-release; OS_ID="${ID:-unknown}"; else OS_ID="unknown"; fi
     if command -v apt-get >/dev/null 2>&1; then PKG="apt";
     elif command -v dnf >/dev/null 2>&1; then PKG="dnf";
     elif command -v yum >/dev/null 2>&1; then PKG="yum";
@@ -47,55 +46,71 @@ detect_os() {
     elif command -v apk >/dev/null 2>&1; then PKG="apk";
     else PKG=""; fi
 }
-
 install_package() {
     local pkg="$1"
     case "$PKG" in
     apt) apt-get update -qq && apt-get install -y "$pkg" ;;
-    dnf) dnf install -y "$pkg" ;;
-    yum) yum install -y "$pkg" ;;
-    pacman) pacman -Sy --noconfirm "$pkg" ;;
-    zypper) zypper install -y "$pkg" ;;
-    apk) apk add --no-cache "$pkg" ;;
-    *) die "Unknown package manager; install '$pkg' manually." ;;
+    dnf) dnf install -y "$pkg" ;; yum) yum install -y "$pkg" ;;
+    pacman) pacman -Sy --noconfirm "$pkg" ;; zypper) zypper install -y "$pkg" ;;
+    apk) apk add --no-cache "$pkg" ;; *) die "Install '$pkg' manually." ;;
+    esac
+}
+need() { command -v "$1" >/dev/null 2>&1 || { colorized_echo yellow "Installing ${2:-$1}..."; install_package "${2:-$1}"; }; }
+
+gen_uuid() { cat /proc/sys/kernel/random/uuid 2>/dev/null || uuidgen 2>/dev/null || die "cannot generate uuid"; }
+gen_key() { openssl rand -hex 32 2>/dev/null || gen_uuid; }
+public_ip() { curl -s -4 --fail --max-time 5 ifconfig.io 2>/dev/null || curl -s -6 --fail --max-time 5 ifconfig.io 2>/dev/null || echo "127.0.0.1"; }
+
+# Map uname -m to our release asset suffix and Xray's arch token.
+detect_arch() {
+    case "$(uname -m)" in
+    x86_64|amd64)  ARCH_SUFFIX="amd64";  XRAY_ARCH="64" ;;
+    aarch64|arm64) ARCH_SUFFIX="arm64";  XRAY_ARCH="arm64-v8a" ;;
+    armv7l|armv7)  ARCH_SUFFIX="armv7";  XRAY_ARCH="arm32-v7a" ;;
+    *) die "Unsupported architecture: $(uname -m)" ;;
     esac
 }
 
-need() {
-    local bin="$1" pkg="${2:-$1}"
-    command -v "$bin" >/dev/null 2>&1 || { colorized_echo yellow "Installing $pkg..."; install_package "$pkg"; }
+latest_tag() {
+    curl -fsSL "https://api.github.com/repos/${GH_REPO}/releases/latest" 2>/dev/null \
+        | grep -oE '"tag_name":[[:space:]]*"[^"]+"' | head -n1 | sed -E 's/.*"([^"]+)"$/\1/'
 }
 
-install_docker() {
-    if command -v docker >/dev/null 2>&1; then return; fi
-    colorized_echo blue "Installing Docker..."
-    curl -fsSL https://get.docker.com | sh
-    systemctl enable --now docker 2>/dev/null || true
-}
-
-detect_compose() {
-    if docker compose version >/dev/null 2>&1; then COMPOSE="docker compose";
-    elif command -v docker-compose >/dev/null 2>&1; then COMPOSE="docker-compose";
-    else die "docker compose not found."; fi
-}
-
-gen_uuid() {
-    cat /proc/sys/kernel/random/uuid 2>/dev/null || uuidgen 2>/dev/null || \
-        python3 -c "import uuid;print(uuid.uuid4())" 2>/dev/null || die "cannot generate uuid"
-}
-gen_key() { openssl rand -hex 32 2>/dev/null || gen_uuid; }
-
-public_ip() {
-    curl -s -4 --fail --max-time 5 ifconfig.io 2>/dev/null || \
-        curl -s -6 --fail --max-time 5 ifconfig.io 2>/dev/null || echo "127.0.0.1"
-}
-
-compose_cmd() { ( cd "$APP_DIR" && $COMPOSE --env-file "$ENV_FILE" -f "$COMPOSE_FILE" "$@" ); }
-
-is_installed() { [ -d "$APP_DIR" ] && [ -f "$COMPOSE_FILE" ]; }
+is_installed() { [ -f "$BIN_PATH" ] && [ -f "$SERVICE_UNIT" ]; }
 require_installed() { is_installed || die "node is not installed. Run: $APP_NAME install"; }
 
-# ---------- cert ----------
+# ---------- install steps ----------
+download_binary() {
+    local tag="$1"
+    [ -n "$tag" ] || die "No release found for ${GH_REPO}. Create a release first (push a tag like v0.1.0) so prebuilt binaries exist."
+    local asset="${BIN_NAME}_linux_${ARCH_SUFFIX}.tar.gz"
+    local url="https://github.com/${GH_REPO}/releases/download/${tag}/${asset}"
+    local tmp; tmp="$(mktemp -d)"
+    colorized_echo blue "Downloading $asset ($tag)..."
+    curl -fsSL "$url" -o "$tmp/$asset" || die "Failed to download $url"
+    tar -xzf "$tmp/$asset" -C "$tmp" || die "Failed to extract $asset"
+    install -m 755 "$tmp/$BIN_NAME" "$BIN_PATH"
+    rm -rf "$tmp"
+    colorized_echo green "✓ Binary installed: $BIN_PATH ($tag, $ARCH_SUFFIX)"
+}
+
+install_xray() {
+    local version="${1:-latest}"
+    need curl curl; need unzip unzip
+    if [ "$version" = "latest" ]; then
+        version="$(curl -fsSL https://api.github.com/repos/XTLS/Xray-core/releases/latest | grep -oE '"tag_name":[[:space:]]*"[^"]+"' | head -n1 | sed -E 's/.*"([^"]+)"$/\1/')"
+    fi
+    mkdir -p "$XRAY_DIR"
+    local tmp; tmp="$(mktemp -d)"
+    colorized_echo blue "Downloading Xray-core $version ($XRAY_ARCH)..."
+    curl -fsSL "https://github.com/XTLS/Xray-core/releases/download/${version}/Xray-linux-${XRAY_ARCH}.zip" -o "$tmp/xray.zip" \
+        || die "Failed to download Xray-core"
+    unzip -o "$tmp/xray.zip" -d "$XRAY_DIR" >/dev/null 2>&1 || die "Failed to extract Xray-core"
+    rm -rf "$tmp"
+    chmod 755 "$XRAY_DIR/xray"
+    colorized_echo green "✓ Xray-core $version installed in $XRAY_DIR"
+}
+
 gen_self_signed_cert() {
     need openssl openssl
     local ip; ip="$(public_ip)"
@@ -112,30 +127,9 @@ gen_self_signed_cert() {
     colorized_echo green "✓ Certificate: $SSL_CERT_FILE"
 }
 
-# ---------- sources ----------
-# Populate APP_DIR with the project sources (clone, or copy a local checkout),
-# so the compose file, its build context and the .env all live together.
-fetch_sources() {
-    if [ -f "Dockerfile.agent" ] && [ -f "docker-compose.agent.yml" ] && [ -d "cmd/agent" ]; then
-        colorized_echo blue "Using local sources -> $APP_DIR"
-        local here; here="$(pwd)"
-        mkdir -p "$APP_DIR"
-        tar -cf - --exclude=.git -C "$here" . | tar -xf - -C "$APP_DIR"
-    else
-        need git git
-        colorized_echo blue "Cloning $REPO_URL -> $APP_DIR"
-        rm -rf "$APP_DIR"
-        git clone --depth 1 "$REPO_URL" "$APP_DIR"
-    fi
-    SRC_DIR="$APP_DIR"
-}
-
 write_fixed_config() {
     [ -f "$FIXED_CONFIG_FILE" ] && { colorized_echo cyan "Keeping existing $FIXED_CONFIG_FILE"; return; }
-    if [ -f "$SRC_DIR/configs/fixed-config.example.json" ]; then
-        cp "$SRC_DIR/configs/fixed-config.example.json" "$FIXED_CONFIG_FILE"
-    else
-        cat >"$FIXED_CONFIG_FILE" <<'JSON'
+    cat >"$FIXED_CONFIG_FILE" <<'JSON'
 {
   "log": { "loglevel": "warning" },
   "inbounds": [
@@ -145,139 +139,153 @@ write_fixed_config() {
   "outbounds": [ { "tag": "direct", "protocol": "freedom" } ]
 }
 JSON
-    fi
     colorized_echo green "✓ Fixed core config: $FIXED_CONFIG_FILE (edit to taste)"
 }
 
 write_env() {
     local master="$1" core="$2" http_port="$3" grpc_port="$4"
+    mkdir -p "$APP_DIR"
     umask 077
     cat >"$ENV_FILE" <<EOF
-APP_NAME=$APP_NAME
-DATA_DIR=$DATA_DIR
+# API_KEY is unused by the multi-tenant agent; set only to silence a harmless warning.
+API_KEY=$(gen_uuid)
 PG_AGENT_HTTP_ADDR=:$http_port
 PG_AGENT_GRPC_ADDR=:$grpc_port
 PG_AGENT_MASTER_KEY=$master
 PG_AGENT_CORE_KEY=$core
-PG_AGENT_TENANT_DB=/var/lib/pg-node/tenants.bolt
-PG_AGENT_FIXED_CONFIG=/var/lib/pg-node/fixed-config.json
+PG_AGENT_TENANT_DB=$DATA_DIR/tenants.bolt
+PG_AGENT_FIXED_CONFIG=$FIXED_CONFIG_FILE
 PG_AGENT_ENFORCE_INTERVAL=10s
-SSL_CERT_FILE=/var/lib/pg-node/certs/ssl_cert.pem
-SSL_KEY_FILE=/var/lib/pg-node/certs/ssl_key.pem
-XRAY_EXECUTABLE_PATH=/usr/local/bin/xray
-XRAY_ASSETS_PATH=/usr/local/share/xray
+SSL_CERT_FILE=$SSL_CERT_FILE
+SSL_KEY_FILE=$SSL_KEY_FILE
+XRAY_EXECUTABLE_PATH=$XRAY_DIR/xray
+XRAY_ASSETS_PATH=$XRAY_DIR
 EOF
     umask 022
     colorized_echo green "✓ Wrote $ENV_FILE"
 }
 
+write_service() {
+    colorized_echo blue "Creating systemd unit $SERVICE_UNIT"
+    cat >"$SERVICE_UNIT" <<EOF
+[Unit]
+Description=PasarGuard multi-tenant node agent ($APP_NAME)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+EnvironmentFile=$ENV_FILE
+WorkingDirectory=$DATA_DIR
+ExecStart=$BIN_PATH
+# Allow binding privileged ports (e.g. 443) and WireGuard kernel ops.
+AmbientCapabilities=CAP_NET_BIND_SERVICE CAP_NET_ADMIN
+Restart=on-failure
+RestartSec=5
+LimitNOFILE=1048576
+
+[Install]
+WantedBy=multi-user.target
+EOF
+    systemctl daemon-reload
+}
+
+install_node_script() {
+    local src="${1:-}"
+    [ -z "$src" ] && src="$(command -v "$0" 2>/dev/null || true)"
+    if [ -n "$src" ] && [ -f "$src" ]; then
+        install -m 755 "$src" "/usr/local/bin/$APP_NAME" 2>/dev/null && \
+            colorized_echo green "✓ CLI installed: /usr/local/bin/$APP_NAME"
+    fi
+}
+
 # ---------- commands ----------
 install_command() {
-    check_root
-    local master="" core="" http_port="8090" grpc_port="62050"
+    check_root; require_systemd
+    local master="" core="" http_port="8090" grpc_port="62050" version="latest"
     while [[ $# -gt 0 ]]; do case "$1" in
         --master-key) master="$2"; shift 2 ;;
         --core-key) core="$2"; shift 2 ;;
         --http-port) http_port="$2"; shift 2 ;;
         --grpc-port) grpc_port="$2"; shift 2 ;;
+        --version) version="$2"; shift 2 ;;
         --san-entries) INSTALL_SAN_ENTRIES="$2"; shift 2 ;;
-        --repo) REPO_URL="$2"; shift 2 ;;
-        -y|--yes) AUTO_CONFIRM=true; shift ;;
+        -y|--yes) shift ;;
         *) die "Unknown install option: $1" ;;
     esac; done
 
-    # Preserve existing keys on reinstall (cloning wipes APP_DIR).
+    # Preserve keys on reinstall.
     if [ -f "$ENV_FILE" ]; then
         [ -z "$master" ] && master="$(grep -E '^PG_AGENT_MASTER_KEY=' "$ENV_FILE" | cut -d= -f2-)"
         [ -z "$core" ] && core="$(grep -E '^PG_AGENT_CORE_KEY=' "$ENV_FILE" | cut -d= -f2-)"
     fi
-
-    detect_os
-    need curl curl; need openssl openssl
-    install_docker; detect_compose
-
     [ -z "$master" ] && master="$(gen_key)"
 
+    detect_os; detect_arch
+    need curl curl; need openssl openssl; need tar tar
+
     mkdir -p "$DATA_DIR"
-    fetch_sources
-    write_fixed_config
+    local tag="$version"
+    [ "$version" = "latest" ] && tag="$(latest_tag)"
+    download_binary "$tag"
+    [ -x "$XRAY_DIR/xray" ] || install_xray latest
     [ -f "$SSL_CERT_FILE" ] || gen_self_signed_cert
+    write_fixed_config
     write_env "$master" "$core" "$http_port" "$grpc_port"
-
-    colorized_echo blue "Building and starting the node agent..."
-    ( cd "$APP_DIR" && $COMPOSE --env-file "$ENV_FILE" -f docker-compose.agent.yml up -d --build )
-
+    write_service
     install_node_script || true
+
+    systemctl enable --now "$APP_NAME"
 
     local ip; ip="$(public_ip)"
     colorized_echo blue "================================"
-    colorized_echo green "PasarGuard node agent is up."
+    colorized_echo green "PasarGuard node agent is running (systemd: $APP_NAME)."
     colorized_echo magenta "  Address (HTTPS control):  https://$ip:$http_port"
     [ -n "$core" ] && colorized_echo magenta "  gRPC (PasarGuard-compat): $ip:$grpc_port"
     colorized_echo magenta "  Master key (register in main panel):"
     colorized_echo red "    $master"
-    [ -n "$core" ] && { colorized_echo magenta "  Core key (for PasarGuard core management):"; colorized_echo red "    $core"; }
+    [ -n "$core" ] && { colorized_echo magenta "  Core key (PasarGuard core management):"; colorized_echo red "    $core"; }
     colorized_echo magenta "  Node certificate (paste into the main panel when adding the node):"
     cat "$SSL_CERT_FILE"
     colorized_echo blue "================================"
 }
 
-install_node_script() {
-    local target="/usr/local/bin/$APP_NAME"
-    if [ -f "$SRC_DIR/scripts/pg-node.sh" ]; then
-        install -m 755 "$SRC_DIR/scripts/pg-node.sh" "$target" 2>/dev/null && \
-            colorized_echo green "✓ CLI installed: $target ($APP_NAME ...)"
-    fi
-}
-uninstall_node_script() { rm -f "/usr/local/bin/$APP_NAME"; }
-
-up_command()      { require_installed; detect_compose; compose_cmd up -d; colorized_echo green "node started."; }
-down_command()    { require_installed; detect_compose; compose_cmd down; colorized_echo green "node stopped."; }
-restart_command() { require_installed; detect_compose; compose_cmd down; compose_cmd up -d; colorized_echo green "node restarted."; }
-status_command()  { require_installed; detect_compose; compose_cmd ps; }
-logs_command()    { require_installed; detect_compose; compose_cmd logs -f --tail=200; }
-edit_command()    { require_installed; "${EDITOR:-nano}" "$COMPOSE_FILE"; }
-edit_env_command(){ require_installed; "${EDITOR:-nano}" "$ENV_FILE"; }
+up_command()      { check_root; require_installed; systemctl start "$APP_NAME"; colorized_echo green "started."; }
+down_command()    { check_root; require_installed; systemctl stop "$APP_NAME"; colorized_echo green "stopped."; }
+restart_command() { check_root; require_installed; systemctl restart "$APP_NAME"; colorized_echo green "restarted."; }
+status_command()  { require_installed; systemctl status --no-pager "$APP_NAME"; }
+logs_command()    { require_installed; journalctl -u "$APP_NAME" -f --no-pager; }
+edit_env_command(){ require_installed; "${EDITOR:-nano}" "$ENV_FILE"; systemctl restart "$APP_NAME"; }
+edit_command()    { require_installed; "${EDITOR:-nano}" "$FIXED_CONFIG_FILE"; colorized_echo yellow "Apply via the main panel (PUT /nodes/{id}/config) or 'restart'."; }
 
 update_command() {
-    check_root; require_installed; detect_compose
-    [ -d "$APP_DIR/.git" ] && ( cd "$APP_DIR" && git pull --ff-only || true )
-    ( cd "$APP_DIR" && $COMPOSE --env-file "$ENV_FILE" -f docker-compose.agent.yml up -d --build )
-    colorized_echo green "node updated."
+    check_root; require_installed; detect_arch
+    local version="${1:-latest}" tag
+    tag="$version"; [ "$version" = "latest" ] && tag="$(latest_tag)"
+    download_binary "$tag"
+    systemctl restart "$APP_NAME"
+    colorized_echo green "node updated to $tag and restarted."
+}
+
+core_update_command() {
+    check_root; require_installed; detect_arch
+    install_xray "${1:-latest}"
+    systemctl restart "$APP_NAME"
+    colorized_echo green "Xray-core updated and node restarted."
 }
 
 renew_cert_command() {
     check_root; require_installed
     gen_self_signed_cert
-    colorized_echo yellow "Restart the node and re-pin the new cert in the main panel."
-    colorized_echo magenta "New certificate:"; cat "$SSL_CERT_FILE"
-    restart_command
-}
-
-core_update_command() {
-    check_root; require_installed
-    local version="${1:-latest}"
-    need curl curl; need unzip unzip
-    local arch; case "$(uname -m)" in
-        x86_64|amd64) arch="64" ;; aarch64|arm64) arch="arm64-v8a" ;;
-        armv7l) arch="arm32-v7a" ;; *) die "unsupported arch $(uname -m)" ;;
-    esac
-    [ "$version" = "latest" ] && version="$(curl -s https://api.github.com/repos/XTLS/Xray-core/releases/latest | grep -oE '"tag_name":[[:space:]]*"[^"]+"' | head -n1 | sed -E 's/.*"([^"]+)"$/\1/')"
-    mkdir -p "$DATA_DIR/xray-core"; cd "$DATA_DIR/xray-core"
-    colorized_echo blue "Downloading Xray-core $version ($arch)..."
-    curl -fsSL "https://github.com/XTLS/Xray-core/releases/download/${version}/Xray-linux-${arch}.zip" -o xray.zip || die "download failed"
-    unzip -o xray.zip >/dev/null 2>&1 || die "extract failed"; rm -f xray.zip
-    # Point the agent at the host-mounted xray binary.
-    sed -i "s|^XRAY_EXECUTABLE_PATH=.*|XRAY_EXECUTABLE_PATH=/var/lib/pg-node/xray-core/xray|" "$ENV_FILE"
-    sed -i "s|^XRAY_ASSETS_PATH=.*|XRAY_ASSETS_PATH=/var/lib/pg-node/xray-core|" "$ENV_FILE"
-    colorized_echo green "✓ Xray-core $version installed."
-    restart_command
+    systemctl restart "$APP_NAME"
+    colorized_echo magenta "New certificate (re-pin in the main panel):"; cat "$SSL_CERT_FILE"
 }
 
 uninstall_command() {
-    check_root; detect_compose
-    is_installed && compose_cmd down 2>/dev/null || true
-    uninstall_node_script
+    check_root
+    systemctl disable --now "$APP_NAME" 2>/dev/null || true
+    rm -f "$SERVICE_UNIT"; systemctl daemon-reload 2>/dev/null || true
+    rm -f "$BIN_PATH" "/usr/local/bin/$APP_NAME"
     rm -rf "$APP_DIR"
     colorized_echo green "node uninstalled. Data kept at $DATA_DIR (remove manually if desired)."
 }
@@ -286,38 +294,35 @@ completion_command() {
     check_root
     local f="/etc/bash_completion.d/$APP_NAME"
     cat >"$f" <<EOF
-_pgnode(){ COMPREPLY=( \$(compgen -W "install update uninstall up down restart status logs core-update renew-cert edit edit-env install-script uninstall-script completion help" -- "\${COMP_WORDS[COMP_CWORD]}") ); }
+_pgnode(){ COMPREPLY=( \$(compgen -W "install update uninstall up down restart status logs core-update renew-cert edit edit-env install-script completion help" -- "\${COMP_WORDS[COMP_CWORD]}") ); }
 complete -F _pgnode $APP_NAME
 EOF
     colorized_echo green "✓ Bash completion installed: $f"
 }
 
 usage() {
-    colorized_echo cyan "pg-node — multi-tenant node agent CLI"
+    colorized_echo cyan "pg-node — multi-tenant node agent (prebuilt binary + systemd)"
     echo "Usage: $APP_NAME <command> [options]"
     echo
     echo "Commands:"
-    echo "  install            Install & start the node agent"
-    echo "  update             Rebuild & restart from latest sources"
+    echo "  install            Download binary + Xray and start the systemd service"
+    echo "  update [VER]       Download a newer agent binary and restart (default: latest)"
     echo "  uninstall          Stop and remove the node"
     echo "  up | down | restart | status | logs"
     echo "  core-update [VER]  Install/replace Xray-core (default: latest)"
     echo "  renew-cert         Regenerate the self-signed certificate"
-    echo "  edit | edit-env    Edit compose / .env"
-    echo "  install-script     Install this CLI to /usr/local/bin"
-    echo "  completion         Install bash completion"
+    echo "  edit | edit-env    Edit fixed config / env"
+    echo "  install-script | completion"
     echo
     echo "Install options:"
     echo "  --master-key KEY   Master key (auto-generated if omitted)"
     echo "  --core-key KEY     Enable PasarGuard-compat gRPC (core config) with this key"
     echo "  --http-port PORT   HTTP control port (default 8090)"
     echo "  --grpc-port PORT   gRPC compat port (default 62050)"
+    echo "  --version vX.Y.Z   Install a specific release (default: latest)"
     echo "  --san-entries CSV  Extra cert SANs (e.g. DNS:node.example.com)"
-    echo "  --repo URL         Source repo to clone (default $REPO_URL)"
-    echo "  -y, --yes          Non-interactive"
 }
 
-AUTO_CONFIRM="${AUTO_CONFIRM:-false}"
 cmd="${1:-help}"; shift || true
 case "$cmd" in
     install) install_command "$@" ;;
@@ -332,8 +337,7 @@ case "$cmd" in
     renew-cert) renew_cert_command ;;
     edit) edit_command ;;
     edit-env) edit_env_command ;;
-    install-script) check_root; SRC_DIR="$(pwd)"; install_node_script ;;
-    uninstall-script) check_root; uninstall_node_script ;;
+    install-script) check_root; install_node_script "$(pwd)/scripts/pg-node.sh" ;;
     completion) completion_command ;;
     help|-h|--help) usage ;;
     *) colorized_echo red "Unknown command: $cmd"; usage; exit 1 ;;

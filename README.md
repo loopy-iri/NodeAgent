@@ -15,14 +15,16 @@
 ## اجرا
 
 ```bash
-# نصب کامل (Docker + build + up):
+# نصب کامل (دانلود باینری per-arch + Xray + systemd؛ بدون build روی سرور):
 sudo bash -c "$(curl -sL https://raw.githubusercontent.com/loopy-iri/NodeAgent/main/scripts/pg-node.sh)" @ install --core-key "$(openssl rand -hex 16)"
 
 # یا از روی clone:
 sudo bash scripts/pg-node.sh install
 ```
 
-دستورهای CLI: `install, update, uninstall, up, down, restart, status, logs, core-update [VER], renew-cert, edit, edit-env, install-script, completion`.
+دستورهای CLI: `install, update [VER], uninstall, up, down, restart, status, logs, core-update [VER], renew-cert, edit, edit-env, install-script, completion`.
+
+> نصب از **باینری از‌پیش‌ساخته** (GitHub Releases) انجام می‌شود؛ برای ساخت باینری‌ها کافی است یک تگ `v*` push کنی تا workflow ریلیز اجرا شود. اجرا با **systemd** (سرویس `pg-node`) است، بدون Docker و بدون کامپایل روی سرور.
 
 ### اجرای محلی (توسعه)
 ```bash
