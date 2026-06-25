@@ -1,39 +1,60 @@
-# Contribute to Gozargah-Node-Go
-Thanks for considering contributing to Gozargah!
+# Contributing to NodeAgent
 
-## Questions
+NodeAgent is a **multi-tenant** node for selling node access, based on a fork of
+[`PasarGuard/node`](https://github.com/PasarGuard/node). Thanks for helping out!
 
-Please don't ask your questions in issues. Instead, use one of the following ways to ask:
-- Ask on our telegram group: [@Gozargah_Marzban](https://t.me/gozargah_marzban)
-- Ask on our [Node GitHub Discussions](https://github.com/m03ed/gozargah_node_go/discussions) for long term discussion or larger questions.
-- Ask on our [Marzban GitHub Discussions](https://github.com/gozargah/marzban/discussions) for long term discussion or larger questions.
+> Repo: https://github.com/loopy-iri/NodeAgent · Control panel: https://github.com/loopy-iri/NodePanel
+> Full guide: the [`docs/wiki/`](docs/wiki/Home.md) folder (also published as the repo Wiki).
 
 ## Reporting issues
+Open a GitHub issue and include:
+- What you expected vs what actually happened.
+- Relevant logs: `sudo pg-node-agent logs` (or `journalctl -u pg-node-agent`).
+- Your fixed Xray config and the env you set (censor secrets: keys, certs).
+- Versions: NodeAgent (release tag), Xray-core, and OS.
 
-Include the following information in your post:
-- Describe what you expected to happen.
-- Describe what actually happened. Include server logs or any error that browser shows.
-- If possible, post your core config file and what you have set in env (by censoring critical information).
-- Also tell the version of Marzban, Core and docker (if you use docker) you are using.
+Do not paste master keys, core keys, customer keys or private certificates.
 
-# Submitting a Pull Request
-If there is not an open issue for what you want to submit, prefer opening one for discussion before working on a PR. You can work on any issue that doesn't have an open PR linked to it or a maintainer assigned to it. These show up in the sidebar. No need to ask if you can work on an issue that interests you.
-<br/>
-Before you create a PR, make sure to run tests using the `make test` command to prevent any bugs.
+## Development setup
+- Go (see `go.mod` for the version) and an Xray binary.
+- Run the test suite before sending a PR:
+  ```bash
+  go build ./...
+  go test ./tenant/... ./shared/... ./controller/...
+  go vet ./...
+  gofmt -l .          # must print nothing
+  ```
+  (The upstream `controller/rest` and `controller/rpc` tests need local cert
+  fixtures and may fail in a bare checkout; the multi-tenant packages above are
+  the ones to keep green.)
+- Run locally:
+  ```bash
+  PG_AGENT_MASTER_KEY=master \
+  PG_AGENT_FIXED_CONFIG=configs/fixed-config.example.json \
+  XRAY_EXECUTABLE_PATH=/path/to/xray \
+  go run ./cmd/agent
+  ```
 
-## Branches
-When starting development on this project, please make sure to create a new branch off the `dev` branch. This helps to keep the `main` branch stable and free of any development work that may not be complete or fully tested.
+## Pull requests
+- Branch off `main`; keep PRs focused and small.
+- Match the existing style; keep changes idiomatic Go and run `gofmt`.
+- Add/extend tests for new behavior (e.g. tenant logic, shared manager).
+- Don't change the Go module path (`github.com/pasarguard/node`).
+- Update `docs/wiki/` (both the Persian page and its `-EN` English counterpart)
+  and the OpenAPI/README when you change behavior or endpoints.
+- Releases are built by the `release.yml` workflow on a `v*` tag.
 
-## Project Structure
+## Project structure
 ```
-├───backend             # Backend handler and interfaces
-│   └───xray            # Xray methods and jobs
-│       └───api         # Xray API handler
-├───common              # Proto files and common object structures
-├───config              # Reads .env configuration
-├───controller          # Service controllers for managing API interactions  
-│   ├───rest            # REST API protocol methods
-│   └───rpc             # gRPC protocol methods
-├───logger              # primary logger for backend logs
-└───tools               # Standalone utilities with no project dependencies
+cmd/agent/             multi-tenant entrypoint
+tenant/                Registry + two-level auth + enforcement (bbolt)
+shared/                shared-core manager (one Xray, per-tenant add/remove)
+controller/agent/      HTTP API (master/tenant) + enforcement loop
+controller/grpccompat/ PasarGuard-compatible gRPC (core key + customer keys)
+pkg/tlsutil/           self-signed TLS helper
+backend/, common/, ... upstream base code
+scripts/pg-node.sh     installer/manager (prebuilt binary + systemd)
+docs/wiki/             bilingual (FA/EN) documentation
 ```
+
+This is a fork; the original license is preserved in `LICENSE`.

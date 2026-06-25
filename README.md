@@ -12,13 +12,13 @@
 - **یکتایی credential** (uuid/password) در کل نود enforce می‌شود (ایزولاسیون امن auth).
 - **enforcement محلی**: اتمام حجم/انقضا → کاربرهای مشتری از هسته حذف و کلیدش رد می‌شود (suspend ≠ delete؛ تمدید کاربرها را برمی‌گرداند).
 - **TLS سلف‌ساین** (auto-gen) + pin گواهی توسط پنل (یا TOFU خودکار).
-- **gRPC سازگار با PasarGuard** (اختیاری، با core key): مدیریت **فقط کانفیگ هسته** از یک پنل بیرونی؛ عملیات کاربر/Stop آن نادیده گرفته می‌شود تا چند-مستأجری نشکند.
+- **gRPC سازگار با PasarGuard** (همیشه فعال): مشتری‌ها با کلید خودشان وصل می‌شوند و کاربر می‌سازند؛ و با **core key** (به‌صورت پیش‌فرض هنگام نصب ساخته می‌شود) اپراتور می‌تواند **فقط کانفیگ هسته** را از یک پنل PasarGuard مدیریت کند. عملیات کاربر/Stop روی اتصال core key نادیده گرفته می‌شود تا چند-مستأجری نشکند.
 
 ## اجرا
 
 ```bash
 # نصب کامل (دانلود باینری per-arch + Xray + systemd؛ بدون build روی سرور):
-sudo bash -c "$(curl -sL https://raw.githubusercontent.com/loopy-iri/NodeAgent/main/scripts/pg-node.sh)" @ install --core-key "$(openssl rand -hex 16)"
+sudo bash -c "$(curl -sL https://raw.githubusercontent.com/loopy-iri/NodeAgent/main/scripts/pg-node.sh)" @ install
 
 # یا از روی clone:
 sudo bash scripts/pg-node.sh install
@@ -26,7 +26,7 @@ sudo bash scripts/pg-node.sh install
 
 دستورهای CLI: `install, update [VER], uninstall, up, down, restart, status, logs, core-update [VER], renew-cert, edit, edit-env, install-script, completion`.
 
-> نصب از **باینری از‌پیش‌ساخته** (GitHub Releases) انجام می‌شود؛ برای ساخت باینری‌ها کافی است یک تگ `v*` push کنی تا workflow ریلیز اجرا شود. اجرا با **systemd** (سرویس `pg-node`) است، بدون Docker و بدون کامپایل روی سرور.
+> نصب از **باینری از‌پیش‌ساخته** (GitHub Releases) انجام می‌شود؛ برای ساخت باینری‌ها کافی است یک تگ `v*` push کنی تا workflow ریلیز اجرا شود. اجرا با **systemd** (سرویس `pg-node-agent`) است، بدون Docker و بدون کامپایل روی سرور. هنگام نصب، master key و core key (به‌صورت پیش‌فرض) و گواهی نود چاپ می‌شوند.
 
 ### اجرای محلی (توسعه)
 ```bash
@@ -40,7 +40,7 @@ $env:XRAY_EXECUTABLE_PATH="<path>/xray"; go run ./cmd/agent
 |---|---|---|
 | `PG_AGENT_HTTP_ADDR` | `:8090` | آدرس API کنترلی (HTTPS) |
 | `PG_AGENT_MASTER_KEY` | — (الزامی) | کلید مستر برای پنل اصلی |
-| `PG_AGENT_CORE_KEY` | خالی | فعال‌سازی gRPC سازگار PasarGuard (مدیریت هسته) |
+| `PG_AGENT_CORE_KEY` | تولید خودکار | کلید مدیریت کانفیگ هسته از پنل PasarGuard (gRPC همیشه فعال است) |
 | `PG_AGENT_GRPC_ADDR` | `:62050` | آدرس gRPC |
 | `PG_AGENT_FORCE_INBOUNDS` | `vless-in` | کاربرهای هر مشتری روی این inbound tag(ها) اعمال شوند (باید با تگ کانفیگ ثابت بخورد) |
 | `PG_AGENT_TENANT_DB` | `tenants.bolt` | مسیر store محلی |
@@ -65,12 +65,13 @@ $env:XRAY_EXECUTABLE_PATH="<path>/xray"; go run ./cmd/agent
 
 ### گزینه‌های نصب اضافه
 - `--name NAME` نام نمونه (مسیر/سرویس/CLI)؛ پیش‌فرض `pg-node-agent` تا کنار نود رسمی نصب شود.
-- `--core-key KEY` فعال‌سازی gRPC مدیریت هسته.
+- `--core-key KEY` کلید مدیریت کانفیگ هسته از پنل PasarGuard (اگر ندهی، خودکار ساخته می‌شود).
 - `--force-inbounds CSV` تگ inboundها (پیش‌فرض `vless-in`).
 
 ## API (HTTP)
-- **master** (`X-API-Key: <master>`): `POST /admin/config`, `POST/GET/DELETE /admin/tenants`, `PATCH .../quota`, `.../suspend|resume|reset`, `.../usage`.
+- **master** (`X-API-Key: <master>`): `POST/GET /admin/config`, `GET /admin/inbounds`, `POST/GET/DELETE /admin/tenants`, `PATCH .../quota`, `.../suspend|resume|reset`, `.../usage`.
 - **tenant** (`X-API-Key: <customer>`): `PUT /tenant/users`, `GET /tenant/me`.
+- **gRPC (PasarGuard-compat, پورت 62050)**: با **core key** مدیریت کانفیگ هسته؛ با **customer key** provision کاربرهای همان مشتری.
 
 ## ساختار
 ```
