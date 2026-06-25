@@ -1,0 +1,29 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  build-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Build
+        run: CGO_ENABLED=0 go build ./...
+
+      - name: Vet (multi-tenant packages)
+        run: go vet ./tenant/... ./shared/... ./controller/agent/... ./controller/grpccompat/...
+
+      # The multi-tenant layer we own. The upstream controller/rest and
+      # controller/rpc tests need pre-generated TLS certs and are skipped here.
+      - name: Test
+        run: go test ./tenant/... ./shared/... ./controller/agent/... ./controller/grpccompat/...
