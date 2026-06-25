@@ -99,6 +99,7 @@ download_binary() {
     colorized_echo blue "Downloading $asset ($tag)..."
     curl -fsSL "$url" -o "$tmp/$asset" || die "Failed to download $url"
     tar -xzf "$tmp/$asset" -C "$tmp" || die "Failed to extract $asset"
+    mkdir -p "$(dirname "$BIN_PATH")"
     install -m 755 "$tmp/$BIN_NAME" "$BIN_PATH"
     rm -rf "$tmp"
     colorized_echo green "✓ Binary installed: $BIN_PATH ($tag, $ARCH_SUFFIX)"
