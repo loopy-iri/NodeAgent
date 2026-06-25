@@ -61,7 +61,18 @@ curl -X POST http://PANEL_IP:8080/api/v1/customers/<CUSTOMER_ID>/subscriptions \
 2. **گواهی نود** (همان PEM)
 3. **کلید مشتری** (`api_key` بالا)
 
+> 💡 **میان‌بر:** به‌جای جمع‌کردن دستی این موارد، در رابط وب روی اشتراک دکمه‌ی **«اتصال مشتری»** را بزن (یا API زیر را صدا بزن). همه‌چیز — آدرس gRPC، گواهی، و **inboundهای واقعی نود** — یک‌جا با دکمه‌ی کپی آماده‌ی تحویل است:
+> ```bash
+> curl http://PANEL_IP:8080/api/v1/subscriptions/<SUB_ID>/connection \
+>   -H "Authorization: Bearer $PANEL_TOKEN"
+> ```
+> پاسخ شامل `grpc_address`, `protocol`, `cert_pem` و `inbounds` است. کلید مشتری اینجا نیست (فقط هنگام ساخت اشتراک نمایش داده می‌شود).
+
 مشتری با این‌ها نود را در پنل PasarGuard خودش اضافه می‌کند → [اتصال مشتری](05-Customer-Connect).
+
+## دیدن/تحویل کانفیگ هسته
+- **کانفیگ کامل زنده‌ی نود** (برای اپراتور): `GET /api/v1/nodes/{id}/config` — کانفیگ در حال اجرا را زنده از نود می‌گیرد (نه صرفاً آخرین push‌شده).
+- **inboundهای قابل‌اشتراک با مشتری** (بدون outbound/routing): `GET /api/v1/nodes/{id}/inbounds` — فقط بخش inbounds (و اگر force-inbounds تنظیم شده، همان تگ‌ها) را برمی‌گرداند تا امن به مشتری بدهی.
 
 ## مدیریت اشتراک
 | کار | API |

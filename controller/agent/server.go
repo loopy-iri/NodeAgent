@@ -49,6 +49,8 @@ func (s *Server) Router() http.Handler {
 		r.Use(s.requireScope(tenant.ScopeMaster))
 
 		r.Post("/admin/config", s.applyConfig)
+		r.Get("/admin/config", s.getConfig)
+		r.Get("/admin/inbounds", s.getInbounds)
 		r.Get("/admin/tenants", s.listTenants)
 		r.Post("/admin/tenants", s.createTenant)
 		r.Delete("/admin/tenants/{id}", s.deleteTenant)

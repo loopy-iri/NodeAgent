@@ -31,6 +31,30 @@ func (s *Server) applyConfig(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// getConfig returns the raw JSON of the currently running core config (master
+// scope only — may contain operator-only outbounds/routing).
+func (s *Server) getConfig(w http.ResponseWriter, _ *http.Request) {
+	cfg := s.mgr.Config()
+	w.Header().Set("Content-Type", "application/json")
+	if cfg == "" {
+		_, _ = w.Write([]byte("{}"))
+		return
+	}
+	_, _ = w.Write([]byte(cfg))
+}
+
+// getInbounds returns the customer-shareable inbound definitions, so the panel
+// can hand them to a buyer to replicate the connection in their own panel.
+func (s *Server) getInbounds(w http.ResponseWriter, _ *http.Request) {
+	doc, err := s.mgr.SharableInbounds()
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "read inbounds: "+err.Error())
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_, _ = w.Write([]byte(doc))
+}
+
 type createTenantRequest struct {
 	ID               string `json:"id"`
 	APIKey           string `json:"api_key"`

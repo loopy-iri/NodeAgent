@@ -14,6 +14,7 @@ package shared
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"strings"
 	"sync"
@@ -37,6 +38,7 @@ type Manager struct {
 	creds         map[string]string                  // credential -> namespacedEmail (owner)
 	forceInbounds []string                           // if set, every user is applied to these inbound tags
 	lastSeen      map[string]int64                   // namespacedEmail -> last absolute traffic bytes (for delta accounting)
+	config        string                             // the raw JSON of the running core config
 }
 
 func NewManager(cfg *config.Config, reg *tenant.Registry) *Manager {
@@ -149,6 +151,7 @@ func (m *Manager) startCoreLocked(ctx context.Context, configJSON string) error 
 		return fmt.Errorf("start core: %w", err)
 	}
 	m.core = core
+	m.config = configJSON
 	return nil
 }
 
@@ -174,6 +177,61 @@ func (m *Manager) Version() string {
 		return ""
 	}
 	return m.core.Version()
+}
+
+// Config returns the raw JSON of the currently running core config (empty if the
+// core has not been started). For the operator/master only — it may contain
+// outbound credentials and routing that must not be shared with customers.
+func (m *Manager) Config() string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.config
+}
+
+// SharableInbounds returns a {"inbounds":[...]} JSON document containing only the
+// inbound definitions a customer needs to replicate the node's connection in
+// their own panel. When force-inbounds is set, only those tags are returned.
+// Outbounds, routing and other operator-only sections are intentionally omitted.
+func (m *Manager) SharableInbounds() (string, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.config == "" {
+		return `{"inbounds":[]}`, nil
+	}
+	var doc struct {
+		Inbounds []json.RawMessage `json:"inbounds"`
+	}
+	if err := json.Unmarshal([]byte(m.config), &doc); err != nil {
+		return "", fmt.Errorf("parse config: %w", err)
+	}
+	keep := doc.Inbounds
+	if len(m.forceInbounds) > 0 {
+		allowed := make(map[string]bool, len(m.forceInbounds))
+		for _, t := range m.forceInbounds {
+			allowed[t] = true
+		}
+		filtered := make([]json.RawMessage, 0, len(doc.Inbounds))
+		for _, ib := range doc.Inbounds {
+			var meta struct {
+				Tag string `json:"tag"`
+			}
+			if err := json.Unmarshal(ib, &meta); err == nil && allowed[meta.Tag] {
+				filtered = append(filtered, ib)
+			}
+		}
+		// Only narrow when at least one forced tag actually matched; otherwise
+		// fall back to all inbounds so the customer still gets something usable.
+		if len(filtered) > 0 {
+			keep = filtered
+		}
+	}
+	out, err := json.Marshal(struct {
+		Inbounds []json.RawMessage `json:"inbounds"`
+	}{Inbounds: keep})
+	if err != nil {
+		return "", err
+	}
+	return string(out), nil
 }
 
 // Stop shuts the shared core down.
