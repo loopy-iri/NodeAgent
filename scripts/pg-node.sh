@@ -71,6 +71,18 @@ gen_uuid() { cat /proc/sys/kernel/random/uuid 2>/dev/null || uuidgen 2>/dev/null
 gen_key() { openssl rand -hex 32 2>/dev/null || gen_uuid; }
 public_ip() { curl -s -4 --fail --max-time 5 ifconfig.io 2>/dev/null || curl -s -6 --fail --max-time 5 ifconfig.io 2>/dev/null || echo "127.0.0.1"; }
 
+# warn_if_port_in_use warns when a TCP port is already bound (e.g. by the
+# official PasarGuard node's Docker container on 62050), which would otherwise
+# cause a silent crash-loop.
+warn_if_port_in_use() {
+    local p="$1" label="$2"
+    command -v ss >/dev/null 2>&1 || return 0
+    if [ -n "$(ss -ltnH "sport = :$p" 2>/dev/null)" ]; then
+        colorized_echo yellow "⚠ پورت $p ($label) از قبل در حال استفاده است (شاید نود/کانتینر دیگری)."
+        colorized_echo yellow "  با --http-port / --grpc-port پورت آزاد بده، یا بعداً در $ENV_FILE تغییر بده."
+    fi
+}
+
 # Map uname -m to our release asset suffix and Xray's arch token.
 detect_arch() {
     case "$(uname -m)" in
@@ -269,6 +281,9 @@ install_command() {
     write_env "$master" "$core" "$http_port" "$grpc_port" "$force_inbounds"
     write_service
     install_node_script || true
+
+    warn_if_port_in_use "$http_port" "HTTP کنترل"
+    warn_if_port_in_use "$grpc_port" "gRPC"
 
     systemctl enable --now "$APP_NAME"
 
