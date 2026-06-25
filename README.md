@@ -5,6 +5,8 @@
 > Repo: `https://github.com/loopy-iri/NodeAgent`
 > پنلِ کنترل در ریپوی جدا: `https://github.com/loopy-iri/NodePanel`
 
+> 📖 **راهنمای کامل (نصب، فروش، اتصال مشتری، API):** پوشه‌ی [`docs/wiki/`](docs/wiki/Home.md) — هم‌چنین به‌صورت تب Wiki ریپو منتشر می‌شود.
+
 ## ویژگی‌ها
 - **Xray مشترک** (سبک) + جداسازی مستأجرها بر اساس کاربر؛ email‌ها per-tenant نِیم‌اسپیس می‌شوند.
 - **یکتایی credential** (uuid/password) در کل نود enforce می‌شود (ایزولاسیون امن auth).
