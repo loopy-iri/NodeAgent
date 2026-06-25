@@ -1,0 +1,28 @@
+# Multi-tenant node agent image (shared-core fork).
+# Builds ./cmd/agent and bundles the Xray core + assets.
+FROM golang:1.26.2-alpine AS builder
+
+RUN apk update && apk add --no-cache make bash curl
+
+WORKDIR /src
+
+COPY go.mod go.sum ./
+RUN go mod download
+
+COPY . .
+RUN CGO_ENABLED=0 go build -trimpath -ldflags "-s -w" -o /out/agent ./cmd/agent
+RUN make install_xray
+
+FROM alpine:latest
+
+LABEL org.opencontainers.image.title="pasarguard-node-agent"
+LABEL org.opencontainers.image.description="Multi-tenant shared-core node agent"
+
+RUN apk update && apk add --no-cache ca-certificates wireguard-tools nftables iproute2 procps
+
+WORKDIR /app
+COPY --from=builder /out/agent /app/agent
+COPY --from=builder /usr/local/bin/xray /usr/local/bin/xray
+COPY --from=builder /usr/local/share/xray /usr/local/share/xray
+
+ENTRYPOINT ["/app/agent"]

@@ -1,0 +1,15 @@
+services:
+  agent:
+    build:
+      context: .
+      dockerfile: Dockerfile.agent
+    image: pasarguard-node-agent:local
+    container_name: ${APP_NAME:-pg-node}
+    restart: always
+    # host networking so the shared Xray inbounds bind directly to the server.
+    network_mode: host
+    cap_add:
+      - NET_ADMIN
+    env_file: .env
+    volumes:
+      - ${DATA_DIR:-/var/lib/pg-node}:/var/lib/pg-node

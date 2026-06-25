@@ -1,0 +1,164 @@
+package agent
+
+import (
+	"errors"
+	"io"
+	"net/http"
+
+	"github.com/go-chi/chi/v5"
+
+	"github.com/pasarguard/node/tenant"
+)
+
+// applyConfig sets the fixed shared-core config and (re)starts the core.
+func (s *Server) applyConfig(w http.ResponseWriter, r *http.Request) {
+	body, err := io.ReadAll(io.LimitReader(r.Body, 8<<20))
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "failed to read body")
+		return
+	}
+	if len(body) == 0 {
+		writeError(w, http.StatusBadRequest, "config body is empty")
+		return
+	}
+	if err := s.mgr.ApplyConfig(r.Context(), string(body)); err != nil {
+		writeError(w, http.StatusInternalServerError, "apply config: "+err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"core_started": s.mgr.Started(),
+		"core_version": s.mgr.Version(),
+	})
+}
+
+type createTenantRequest struct {
+	ID               string `json:"id"`
+	APIKey           string `json:"api_key"`
+	QuotaBytes       int64  `json:"quota_bytes"`
+	CreditLimitBytes int64  `json:"credit_limit_bytes"`
+	ExpireAt         int64  `json:"expire_at"`
+	PeriodID         uint64 `json:"period_id"`
+}
+
+func (s *Server) createTenant(w http.ResponseWriter, r *http.Request) {
+	var req createTenantRequest
+	if err := decodeJSON(r, &req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid json body")
+		return
+	}
+	if req.ID == "" || req.APIKey == "" {
+		writeError(w, http.StatusBadRequest, "id and api_key are required")
+		return
+	}
+
+	tn, err := s.reg.CreateTenant(tenant.CreateParams{
+		ID:               req.ID,
+		APIKey:           req.APIKey,
+		QuotaBytes:       req.QuotaBytes,
+		CreditLimitBytes: req.CreditLimitBytes,
+		ExpireAt:         req.ExpireAt,
+		PeriodID:         req.PeriodID,
+	})
+	if err != nil {
+		switch {
+		case errors.Is(err, tenant.ErrAlreadyExists), errors.Is(err, tenant.ErrKeyConflict):
+			writeError(w, http.StatusConflict, err.Error())
+		default:
+			writeError(w, http.StatusInternalServerError, err.Error())
+		}
+		return
+	}
+	writeJSON(w, http.StatusCreated, tenantView(tn))
+}
+
+func (s *Server) deleteTenant(w http.ResponseWriter, r *http.Request) {
+	id := chi.URLParam(r, "id")
+	if err := s.mgr.DeleteTenant(r.Context(), id); err != nil {
+		writeNotFoundOr500(w, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+type setQuotaRequest struct {
+	QuotaBytes       int64 `json:"quota_bytes"`
+	CreditLimitBytes int64 `json:"credit_limit_bytes"`
+	ExpireAt         int64 `json:"expire_at"`
+}
+
+func (s *Server) setQuota(w http.ResponseWriter, r *http.Request) {
+	id := chi.URLParam(r, "id")
+	var req setQuotaRequest
+	if err := decodeJSON(r, &req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid json body")
+		return
+	}
+	tn, err := s.reg.SetQuota(id, req.QuotaBytes, req.CreditLimitBytes, req.ExpireAt)
+	if err != nil {
+		writeNotFoundOr500(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, tenantView(tn))
+}
+
+func (s *Server) suspendTenant(w http.ResponseWriter, r *http.Request) {
+	id := chi.URLParam(r, "id")
+	if err := s.mgr.SuspendTenant(r.Context(), id, tenant.ReasonManual); err != nil {
+		writeNotFoundOr500(w, err)
+		return
+	}
+	tn, _ := s.reg.Get(id)
+	writeJSON(w, http.StatusOK, tenantView(tn))
+}
+
+func (s *Server) resumeTenant(w http.ResponseWriter, r *http.Request) {
+	id := chi.URLParam(r, "id")
+	if err := s.mgr.ResumeTenant(r.Context(), id); err != nil {
+		writeNotFoundOr500(w, err)
+		return
+	}
+	tn, _ := s.reg.Get(id)
+	writeJSON(w, http.StatusOK, tenantView(tn))
+}
+
+func (s *Server) resetTenant(w http.ResponseWriter, r *http.Request) {
+	id := chi.URLParam(r, "id")
+	if _, err := s.reg.ResetPeriod(id); err != nil {
+		writeNotFoundOr500(w, err)
+		return
+	}
+	// Re-apply users now that the tenant is active again.
+	if err := s.mgr.ResumeTenant(r.Context(), id); err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	tn, _ := s.reg.Get(id)
+	writeJSON(w, http.StatusOK, tenantView(tn))
+}
+
+func (s *Server) listTenants(w http.ResponseWriter, _ *http.Request) {
+	tenants := s.reg.List()
+	views := make([]tenantViewModel, 0, len(tenants))
+	for _, tn := range tenants {
+		views = append(views, tenantView(tn))
+	}
+	writeJSON(w, http.StatusOK, views)
+}
+
+func (s *Server) tenantUsage(w http.ResponseWriter, r *http.Request) {
+	id := chi.URLParam(r, "id")
+	tn, ok := s.reg.Get(id)
+	if !ok {
+		writeError(w, http.StatusNotFound, "tenant not found")
+		return
+	}
+	writeJSON(w, http.StatusOK, usageView(tn))
+}
+
+func writeNotFoundOr500(w http.ResponseWriter, err error) {
+	if errors.Is(err, tenant.ErrNotFound) {
+		writeError(w, http.StatusNotFound, "tenant not found")
+		return
+	}
+	writeError(w, http.StatusInternalServerError, err.Error())
+}

@@ -1,0 +1,350 @@
+// Package shared implements the shared-core multi-tenant manager: a single Xray
+// process serves all tenants, who are separated by the users (emails) they own.
+//
+// It ties together the tenant.Registry (quota/status/expiry, the local source of
+// truth for enforcement) and the existing backend/xray core (runtime add/remove
+// user and per-user stats). Enforcement is non-destructive: suspending a tenant
+// removes its users from the live core but keeps their records, so a resume or
+// renewal restores them with the same credentials.
+//
+// Note: time limits and lifecycle of individual end-users are the customer's
+// responsibility (managed by their own panel). The node only enforces the
+// buyer/tenant-level quota and expiry.
+package shared
+
+import (
+	"context"
+	"fmt"
+	"strings"
+	"sync"
+
+	"github.com/pasarguard/node/backend/xray"
+	"github.com/pasarguard/node/common"
+	"github.com/pasarguard/node/config"
+	"github.com/pasarguard/node/pkg/netutil"
+	"github.com/pasarguard/node/tenant"
+)
+
+// Manager owns the single shared Xray core and routes per-tenant user
+// operations to it.
+type Manager struct {
+	mu      sync.Mutex
+	cfg     *config.Config
+	reg     *tenant.Registry
+	core    *xray.Xray
+	users   map[string]map[string]*common.User // tenantID -> namespacedEmail -> user
+	emailTo map[string]string                  // namespacedEmail -> tenantID
+	creds   map[string]string                  // credential ("vless:<id>", ...) -> namespacedEmail (owner)
+}
+
+func NewManager(cfg *config.Config, reg *tenant.Registry) *Manager {
+	return &Manager{
+		cfg:     cfg,
+		reg:     reg,
+		users:   make(map[string]map[string]*common.User),
+		emailTo: make(map[string]string),
+		creds:   make(map[string]string),
+	}
+}
+
+// userCredentials returns the protocol credentials a user carries. Credentials
+// must be globally unique on a node: in a shared inbound the uuid/password is the
+// actual authentication secret, so a collision across tenants would break both
+// isolation and traffic accounting.
+func userCredentials(u *common.User) []string {
+	p := u.GetProxies()
+	if p == nil {
+		return nil
+	}
+	var out []string
+	if v := p.GetVless(); v != nil && v.GetId() != "" {
+		out = append(out, "vless:"+v.GetId())
+	}
+	if v := p.GetVmess(); v != nil && v.GetId() != "" {
+		out = append(out, "vmess:"+v.GetId())
+	}
+	if t := p.GetTrojan(); t != nil && t.GetPassword() != "" {
+		out = append(out, "trojan:"+t.GetPassword())
+	}
+	if s := p.GetShadowsocks(); s != nil && s.GetPassword() != "" {
+		out = append(out, "ss:"+s.GetPassword())
+	}
+	if h := p.GetHysteria(); h != nil && h.GetAuth() != "" {
+		out = append(out, "hy:"+h.GetAuth())
+	}
+	return out
+}
+
+// StartCore brings up the shared Xray with a fixed operator-provided config.
+func (m *Manager) StartCore(ctx context.Context, configJSON string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.core != nil {
+		return fmt.Errorf("core already started")
+	}
+	return m.startCoreLocked(ctx, configJSON)
+}
+
+// ApplyConfig (re)starts the shared core with a new fixed config and re-applies
+// the users of all currently active tenants. Used by the master to push config.
+func (m *Manager) ApplyConfig(ctx context.Context, configJSON string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	m.stopLocked()
+	if err := m.startCoreLocked(ctx, configJSON); err != nil {
+		return err
+	}
+
+	for tenantID := range m.users {
+		tn, ok := m.reg.Get(tenantID)
+		if !ok || tn.Status != tenant.StatusActive {
+			continue
+		}
+		if err := m.addTenantToCore(ctx, tenantID); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (m *Manager) startCoreLocked(ctx context.Context, configJSON string) error {
+	xcfg, err := xray.NewConfig(configJSON, nil)
+	if err != nil {
+		return fmt.Errorf("parse config: %w", err)
+	}
+
+	apiPort := netutil.FindFreePort()
+	metricPort := netutil.FindFreePort()
+
+	core, err := xray.New(ctx, xcfg, nil, apiPort, metricPort, m.cfg)
+	if err != nil {
+		return fmt.Errorf("start core: %w", err)
+	}
+	m.core = core
+	return nil
+}
+
+// Started reports whether the shared core process is running.
+func (m *Manager) Started() bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.core != nil && m.core.Started()
+}
+
+// Version returns the running core version.
+func (m *Manager) Version() string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.core == nil {
+		return ""
+	}
+	return m.core.Version()
+}
+
+// Stop shuts the shared core down.
+func (m *Manager) Stop() {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.stopLocked()
+}
+
+func (m *Manager) stopLocked() {
+	if m.core != nil {
+		m.core.Shutdown()
+		m.core = nil
+	}
+}
+
+// SetTenantUsers replaces the user set owned by a tenant. Emails are namespaced
+// per tenant to avoid collisions across customers. Users are applied to the live
+// core only if the tenant is currently active.
+func (m *Manager) SetTenantUsers(ctx context.Context, tenantID string, users []*common.User) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	tn, ok := m.reg.Get(tenantID)
+	if !ok {
+		return tenant.ErrNotFound
+	}
+	active := tn.Status == tenant.StatusActive
+	prefix := "t" + tenantID + "."
+
+	newSet := make(map[string]*common.User, len(users))
+	for _, u := range users {
+		ne := namespacedEmail(tenantID, u.GetEmail())
+		newSet[ne] = withEmail(u, ne)
+	}
+
+	// Enforce credential uniqueness: no duplicates within this batch, and no
+	// collision with a credential already owned by another tenant.
+	batch := make(map[string]string)
+	for email, u := range newSet {
+		for _, cred := range userCredentials(u) {
+			if other, dup := batch[cred]; dup && other != email {
+				return fmt.Errorf("duplicate credential shared by users %q and %q", email, other)
+			}
+			batch[cred] = email
+			if owner, exists := m.creds[cred]; exists && !strings.HasPrefix(owner, prefix) {
+				return fmt.Errorf("credential already in use by another tenant")
+			}
+		}
+	}
+
+	// Remove users that are no longer present.
+	for email, u := range m.users[tenantID] {
+		if _, keep := newSet[email]; keep {
+			continue
+		}
+		_ = m.removeFromCore(ctx, u)
+		delete(m.emailTo, email)
+		for _, cred := range userCredentials(u) {
+			delete(m.creds, cred)
+		}
+	}
+
+	// Add or refresh users.
+	for email, u := range newSet {
+		m.emailTo[email] = tenantID
+		for _, cred := range userCredentials(u) {
+			m.creds[cred] = email
+		}
+		if active && m.core != nil {
+			if err := m.core.SyncUser(ctx, u); err != nil {
+				return fmt.Errorf("sync user %q: %w", email, err)
+			}
+		}
+	}
+
+	m.users[tenantID] = newSet
+	return nil
+}
+
+// SuspendTenant marks a tenant suspended and removes its users from the live
+// core (their connections drop). Records are retained for later resume.
+func (m *Manager) SuspendTenant(ctx context.Context, tenantID string, reason tenant.Reason) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if _, err := m.reg.Suspend(tenantID, reason); err != nil {
+		return err
+	}
+	m.removeTenantFromCore(ctx, tenantID)
+	return nil
+}
+
+// ResumeTenant reactivates a tenant and re-adds its users to the live core.
+func (m *Manager) ResumeTenant(ctx context.Context, tenantID string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if _, err := m.reg.Resume(tenantID); err != nil {
+		return err
+	}
+	return m.addTenantToCore(ctx, tenantID)
+}
+
+// DeleteTenant permanently removes a tenant: its users are removed from the live
+// core and all of its records are dropped.
+func (m *Manager) DeleteTenant(ctx context.Context, tenantID string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.removeTenantFromCore(ctx, tenantID)
+	if err := m.reg.Delete(tenantID); err != nil {
+		return err
+	}
+	for email, u := range m.users[tenantID] {
+		delete(m.emailTo, email)
+		for _, cred := range userCredentials(u) {
+			delete(m.creds, cred)
+		}
+	}
+	delete(m.users, tenantID)
+	return nil
+}
+
+// CollectAndEnforce polls per-user traffic, attributes it to tenants, applies
+// quota/expiry enforcement, and removes suspended tenants' users from the core.
+// It is intended to be called periodically by a background loop.
+func (m *Manager) CollectAndEnforce(ctx context.Context, now int64) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	if m.core == nil {
+		return nil
+	}
+
+	resp, err := m.core.GetStats(ctx, &common.StatRequest{
+		Type:   common.StatType_UsersStat,
+		Reset_: true,
+	})
+	if err == nil && resp != nil {
+		deltas := make(map[string]int64)
+		for _, s := range resp.GetStats() {
+			email := s.GetName() // user stat name is the email
+			if tid, ok := m.emailTo[email]; ok {
+				deltas[tid] += s.GetValue()
+			}
+		}
+		for tid, d := range deltas {
+			if _, err := m.reg.AddUsage(tid, d); err != nil {
+				return fmt.Errorf("add usage %q: %w", tid, err)
+			}
+		}
+	}
+
+	for _, c := range m.reg.Enforce(now) {
+		m.removeTenantFromCore(ctx, c.Tenant.ID)
+	}
+	return nil
+}
+
+// --- internal helpers (callers hold m.mu) ---
+
+func (m *Manager) removeTenantFromCore(ctx context.Context, tenantID string) {
+	if m.core == nil {
+		return
+	}
+	for _, u := range m.users[tenantID] {
+		_ = m.removeFromCore(ctx, u)
+	}
+}
+
+func (m *Manager) addTenantToCore(ctx context.Context, tenantID string) error {
+	if m.core == nil {
+		return nil
+	}
+	for email, u := range m.users[tenantID] {
+		if err := m.core.SyncUser(ctx, u); err != nil {
+			return fmt.Errorf("sync user %q: %w", email, err)
+		}
+	}
+	return nil
+}
+
+// removeFromCore removes a user from every inbound by syncing it with no
+// inbounds, which the backend translates into RemoveInboundUser calls.
+func (m *Manager) removeFromCore(ctx context.Context, u *common.User) error {
+	if m.core == nil {
+		return nil
+	}
+	return m.core.UpdateUsers(ctx, []*common.User{withInbounds(u, nil)})
+}
+
+func namespacedEmail(tenantID, email string) string {
+	return "t" + tenantID + "." + email
+}
+
+func withEmail(u *common.User, email string) *common.User {
+	return &common.User{
+		Email:    email,
+		Proxies:  u.GetProxies(),
+		Inbounds: u.GetInbounds(),
+	}
+}
+
+func withInbounds(u *common.User, inbounds []string) *common.User {
+	return &common.User{
+		Email:    u.GetEmail(),
+		Proxies:  u.GetProxies(),
+		Inbounds: inbounds,
+	}
+}
