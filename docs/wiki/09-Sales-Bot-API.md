@@ -23,6 +23,7 @@ Authorization: Bearer <PANEL_TOKEN>
 | ساخت مشتری | `POST /api/v1/customers` |
 | ساخت اشتراک (کلید مشتری) | `POST /api/v1/customers/{id}/subscriptions` |
 | اطلاعات اتصال مشتری (gRPC/cert/inbounds) | `GET /api/v1/subscriptions/{id}/connection` |
+| جزئیات نود (هاست/پورت‌ها/گواهی) | `GET /api/v1/nodes/{id}` |
 | inboundهای قابل‌اشتراک نود | `GET /api/v1/nodes/{id}/inbounds` |
 | کانفیگ زنده‌ی نود | `GET /api/v1/nodes/{id}/config` |
 | مصرف مشتری (+overage) | `GET /api/v1/customers/{id}/usage` |
