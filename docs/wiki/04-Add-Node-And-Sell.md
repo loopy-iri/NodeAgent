@@ -1,3 +1,7 @@
+<div dir="rtl">
+
+[🇬🇧 English](04-Add-Node-And-Sell-EN) · **🇮🇷 فارسی**
+
 # ۳) افزودن نود و فروش (اپراتور)
 
 می‌توانی از **رابط وب پنل** (`http://PANEL_IP:8080/`) یا مستقیم از **API** (`/docs`) استفاده کنی. در ادامه هر دو نشان داده شده است.
@@ -88,3 +92,5 @@ curl -X POST http://PANEL_IP:8080/api/v1/customers/<CUSTOMER_ID>/subscriptions \
 | فعال/غیرفعال کل مشتری | `POST /api/v1/customers/{id}/enable` \| `/disable` |
 
 > **suspend ≠ delete:** تعلیق فقط کاربرها را از هسته برمی‌دارد ولی رکوردها می‌مانند؛ resume/renew برشان می‌گرداند. حذف، مستأجر و داده‌هایش را پاک می‌کند.
+
+</div>

@@ -1,3 +1,7 @@
+<div dir="rtl">
+
+[🇬🇧 English](01-Roles-EN) · **🇮🇷 فارسی**
+
 # نقش‌ها و جریان کار
 
 ## ۱. اپراتور (تو)
@@ -31,3 +35,5 @@
 - با **Bearer token** پنل، مشتری/اشتراک می‌سازد، suspend/resume/renew/topup می‌کند.
 - از **webhook**های امضاشده (HMAC-SHA256) برای رویدادهای مصرف/overage استفاده می‌کند تا کیف‌پول را به‌روز کند.
 - جزئیات: [API و Webhook](09-Sales-Bot-API).
+
+</div>

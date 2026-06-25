@@ -1,3 +1,7 @@
+<div dir="rtl">
+
+[🇬🇧 English](07-Update-Maintenance-EN) · **🇮🇷 فارسی**
+
 # آپدیت و نگهداری (اپراتور)
 
 ## آپدیت
@@ -47,3 +51,5 @@ sudo bash -c "$(curl -sL .../pg-node.sh)" @ install --name pg-node-agent
 sudo pg-node-agent uninstall   # دیتا در /var/lib/... می‌ماند (دستی پاک کن)
 sudo pg-panel uninstall
 ```
+
+</div>

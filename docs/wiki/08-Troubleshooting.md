@@ -1,3 +1,7 @@
+<div dir="rtl">
+
+[🇬🇧 English](08-Troubleshooting-EN) · **🇮🇷 فارسی**
+
 # عیب‌یابی
 
 ## نصب: `cannot create regular file '/opt/.../...': No such file or directory`
@@ -45,3 +49,5 @@ sudo ss -ltnp 'sport = :8090'      # نود: HTTP کنترل
 
 ## مصرف اضافه (overage)
 چون Xray مشترک است، ممکن است کمی مصرف بعد از اتمام حجم تا لحظه‌ی enforce ثبت شود. این overage در `GET /customers/{id}/usage` (`overage_bytes`) گزارش می‌شود تا ربات فروش کیف‌پول را تنظیم کند. بازه‌ی enforce پیش‌فرض ۱۰ ثانیه است (`PG_AGENT_ENFORCE_INTERVAL`).
+
+</div>
