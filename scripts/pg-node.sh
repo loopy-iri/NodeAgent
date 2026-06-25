@@ -209,8 +209,16 @@ install_node_script() {
     [ -z "$src" ] && src="$(command -v "$0" 2>/dev/null || true)"
     if [ -n "$src" ] && [ -f "$src" ]; then
         install -m 755 "$src" "/usr/local/bin/$APP_NAME" 2>/dev/null && \
+            { colorized_echo green "✓ CLI installed: /usr/local/bin/$APP_NAME"; return; }
+    fi
+    # Fallback (e.g. piped via `bash -c "$(curl ...)"` where $0 is not a file):
+    # fetch the script from GitHub so the CLI is always installed.
+    local tmp; tmp="$(mktemp)"
+    if curl -fsSL "$RAW_SCRIPT_URL" -o "$tmp" 2>/dev/null && [ -s "$tmp" ]; then
+        install -m 755 "$tmp" "/usr/local/bin/$APP_NAME" 2>/dev/null && \
             colorized_echo green "✓ CLI installed: /usr/local/bin/$APP_NAME"
     fi
+    rm -f "$tmp"
 }
 
 # self_update_script refreshes the installed CLI itself from GitHub so script
