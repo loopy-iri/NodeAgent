@@ -113,15 +113,21 @@ gen_self_signed_cert() {
 }
 
 # ---------- sources ----------
+# Populate APP_DIR with the project sources (clone, or copy a local checkout),
+# so the compose file, its build context and the .env all live together.
 fetch_sources() {
-    if [ -f "Dockerfile.agent" ] && [ -f "docker-compose.agent.yml" ]; then
-        SRC_DIR="$(pwd)"
+    if [ -f "Dockerfile.agent" ] && [ -f "docker-compose.agent.yml" ] && [ -d "cmd/agent" ]; then
+        colorized_echo blue "Using local sources -> $APP_DIR"
+        local here; here="$(pwd)"
+        mkdir -p "$APP_DIR"
+        tar -cf - --exclude=.git -C "$here" . | tar -xf - -C "$APP_DIR"
     else
         need git git
-        colorized_echo blue "Cloning $REPO_URL ..."
-        rm -rf "$APP_DIR/src"; git clone --depth 1 "$REPO_URL" "$APP_DIR/src"
-        SRC_DIR="$APP_DIR/src"
+        colorized_echo blue "Cloning $REPO_URL -> $APP_DIR"
+        rm -rf "$APP_DIR"
+        git clone --depth 1 "$REPO_URL" "$APP_DIR"
     fi
+    SRC_DIR="$APP_DIR"
 }
 
 write_fixed_config() {
@@ -180,24 +186,26 @@ install_command() {
         *) die "Unknown install option: $1" ;;
     esac; done
 
+    # Preserve existing keys on reinstall (cloning wipes APP_DIR).
+    if [ -f "$ENV_FILE" ]; then
+        [ -z "$master" ] && master="$(grep -E '^PG_AGENT_MASTER_KEY=' "$ENV_FILE" | cut -d= -f2-)"
+        [ -z "$core" ] && core="$(grep -E '^PG_AGENT_CORE_KEY=' "$ENV_FILE" | cut -d= -f2-)"
+    fi
+
     detect_os
     need curl curl; need openssl openssl
     install_docker; detect_compose
 
     [ -z "$master" ] && master="$(gen_key)"
-    [ -z "$core" ] && core=""   # core key empty => PasarGuard-compat gRPC disabled
 
-    mkdir -p "$APP_DIR" "$DATA_DIR"
+    mkdir -p "$DATA_DIR"
     fetch_sources
-    cp "$SRC_DIR/Dockerfile.agent" "$APP_DIR/" 2>/dev/null || true
-    cp "$SRC_DIR/docker-compose.agent.yml" "$APP_DIR/"
-    # The build context must contain the source; build from SRC_DIR.
     write_fixed_config
     [ -f "$SSL_CERT_FILE" ] || gen_self_signed_cert
     write_env "$master" "$core" "$http_port" "$grpc_port"
 
     colorized_echo blue "Building and starting the node agent..."
-    ( cd "$SRC_DIR" && $COMPOSE --env-file "$ENV_FILE" -f docker-compose.agent.yml up -d --build )
+    ( cd "$APP_DIR" && $COMPOSE --env-file "$ENV_FILE" -f docker-compose.agent.yml up -d --build )
 
     install_node_script || true
 
@@ -233,9 +241,8 @@ edit_env_command(){ require_installed; "${EDITOR:-nano}" "$ENV_FILE"; }
 
 update_command() {
     check_root; require_installed; detect_compose
-    if [ -d "$APP_DIR/src" ]; then ( cd "$APP_DIR/src" && git pull --ff-only || true ); fi
-    SRC_DIR="${APP_DIR}/src"; [ -d "$SRC_DIR" ] || SRC_DIR="$APP_DIR"
-    ( cd "$SRC_DIR" && $COMPOSE --env-file "$ENV_FILE" -f docker-compose.agent.yml up -d --build )
+    [ -d "$APP_DIR/.git" ] && ( cd "$APP_DIR" && git pull --ff-only || true )
+    ( cd "$APP_DIR" && $COMPOSE --env-file "$ENV_FILE" -f docker-compose.agent.yml up -d --build )
     colorized_echo green "node updated."
 }
 
