@@ -11,6 +11,7 @@ sudo bash -c "$(curl -sL https://raw.githubusercontent.com/loopy-iri/NodeAgent/m
 ```bash
 sudo bash -c "$(curl -sL https://raw.githubusercontent.com/loopy-iri/NodeAgent/main/scripts/pg-node.sh)" @ install --core-key "$(openssl rand -hex 32)"
 ```
+> از نسخه‌ی فعلی، اگر `--core-key` ندهی هم یک core key **خودکار ساخته** می‌شود و در خروجی نصب چاپ می‌شود؛ پس مدیریت هسته از پنل PasarGuard همیشه آماده است.
 
 در پایان این‌ها چاپ می‌شود — **یادداشت کن** (مخصوصاً master key و گواهی):
 ```
@@ -30,7 +31,7 @@ Node certificate (paste into the main panel when adding the node):
 | گزینه | پیش‌فرض | توضیح |
 |------|---------|-------|
 | `--master-key KEY` | تصادفی | کلید مدیریت کامل (برای ثبت در پنل اصلی) |
-| `--core-key KEY` | خالی | فعال‌سازی gRPC سازگار PasarGuard برای مدیریت هسته |
+| `--core-key KEY` | تولید خودکار | کلید مدیریت هسته از پنل PasarGuard خودت (پیش‌فرض ساخته می‌شود) |
 | `--http-port PORT` | `8090` | پورت API کنترلی (HTTPS) |
 | `--grpc-port PORT` | `62050` | پورت gRPC |
 | `--force-inbounds CSV` | `vless-in` | کاربرهای هر مشتری روی این inbound tag(ها) اعمال شوند (باید با تگ کانفیگ ثابت بخورد) |

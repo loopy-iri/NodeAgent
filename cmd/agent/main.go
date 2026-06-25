@@ -101,19 +101,20 @@ func main() {
 		log.Printf("node TLS certificate (register this in the main panel):\n%s", certPEM)
 	}
 
-	// Optional: PasarGuard-compatible gRPC API for core-config management only.
-	var stopGRPC func()
-	if coreKey != "" {
-		tlsConfig, err := tlsutil.LoadTLSCredentials(nodeCfg.SslCertFile, nodeCfg.SslKeyFile)
-		if err != nil {
-			log.Fatalf("load tls for grpc: %v", err)
-		}
-		stopGRPC, err = grpccompat.Serve(tlsConfig, grpcAddr, grpccompat.New(mgr, authn, coreKey))
-		if err != nil {
-			log.Fatalf("start grpc compat: %v", err)
-		}
-	} else {
-		log.Println("PG_AGENT_CORE_KEY not set; PasarGuard-compat gRPC API disabled")
+	// PasarGuard-compatible gRPC API. Always started: customers connect here with
+	// their tenant keys to provision users. When PG_AGENT_CORE_KEY is set, the
+	// operator can also connect their own PasarGuard panel with the core key to
+	// manage ONLY the shared Xray core config (user/Stop ops from it are ignored).
+	tlsConfig, err := tlsutil.LoadTLSCredentials(nodeCfg.SslCertFile, nodeCfg.SslKeyFile)
+	if err != nil {
+		log.Fatalf("load tls for grpc: %v", err)
+	}
+	stopGRPC, err := grpccompat.Serve(tlsConfig, grpcAddr, grpccompat.New(mgr, authn, coreKey))
+	if err != nil {
+		log.Fatalf("start grpc compat: %v", err)
+	}
+	if coreKey == "" {
+		log.Println("PG_AGENT_CORE_KEY not set; core-config management via PasarGuard disabled (customer provisioning still works)")
 	}
 
 	httpSrv := &http.Server{

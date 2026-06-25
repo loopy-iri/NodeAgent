@@ -267,6 +267,9 @@ install_command() {
         [ -z "$core" ] && core="$(grep -E '^PG_AGENT_CORE_KEY=' "$ENV_FILE" | cut -d= -f2-)"
     fi
     [ -z "$master" ] && master="$(gen_key)"
+    # Generate a core key by default so the operator can manage the Xray core
+    # from their own PasarGuard panel out of the box (only this key may push config).
+    [ -z "$core" ] && core="$(gen_key)"
 
     detect_os; detect_arch
     need curl curl; need openssl openssl; need tar tar
