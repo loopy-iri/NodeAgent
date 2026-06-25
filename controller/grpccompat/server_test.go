@@ -53,7 +53,8 @@ func authCtx(key string) context.Context {
 
 func TestGRPCAuth(t *testing.T) {
 	reg, _ := tenant.NewRegistry(tenant.NewMemStore())
-	client := startBufServer(t, New(shared.NewManager(&config.Config{}, reg), "core-secret"))
+	authn := tenant.NewAuthenticator("master", reg)
+	client := startBufServer(t, New(shared.NewManager(&config.Config{}, reg), authn, "core-secret"))
 
 	// Wrong key -> denied.
 	if _, err := client.GetBaseInfo(authCtx("wrong"), &common.Empty{}); err == nil {
@@ -68,11 +69,12 @@ func TestGRPCAuth(t *testing.T) {
 func TestGRPCSyncUsersIsNoop(t *testing.T) {
 	reg, _ := tenant.NewRegistry(tenant.NewMemStore())
 	mgr := shared.NewManager(&config.Config{}, reg)
-	client := startBufServer(t, New(mgr, "core-secret"))
+	authn := tenant.NewAuthenticator("master", reg)
+	client := startBufServer(t, New(mgr, authn, "core-secret"))
 
 	ctx := authCtx("core-secret")
 
-	// SyncUsers from the external panel must be accepted (no error)...
+	// SyncUsers from the core operator must be accepted (no error)...
 	if _, err := client.SyncUsers(ctx, &common.Users{Users: []*common.User{
 		{Email: "panel-user", Proxies: &common.Proxy{Vless: &common.Vless{Id: "x"}}, Inbounds: []string{"vless-in"}},
 	}}); err != nil {
@@ -80,12 +82,41 @@ func TestGRPCSyncUsersIsNoop(t *testing.T) {
 	}
 	// ...but must NOT create any tenant or apply users in our system.
 	if got := len(reg.List()); got != 0 {
-		t.Fatalf("panel SyncUsers must not create tenants/users, found %d", got)
+		t.Fatalf("core-scope SyncUsers must not create tenants/users, found %d", got)
 	}
 
 	// Stop must be a no-op (returns ok, does nothing).
 	if _, err := client.Stop(ctx, &common.Empty{}); err != nil {
 		t.Fatalf("Stop should be a no-op success, got %v", err)
+	}
+}
+
+func TestGRPCTenantKeyProvisionsUsers(t *testing.T) {
+	reg, _ := tenant.NewRegistry(tenant.NewMemStore())
+	if _, err := reg.CreateTenant(tenant.CreateParams{ID: "t1", APIKey: "cust-key", QuotaBytes: 1 << 30}); err != nil {
+		t.Fatal(err)
+	}
+	mgr := shared.NewManager(&config.Config{}, reg) // core nil: users tracked, not applied to xray
+	authn := tenant.NewAuthenticator("master", reg)
+	client := startBufServer(t, New(mgr, authn, "core-secret"))
+
+	// A customer's panel connects with its key and Start()s with its users.
+	if _, err := client.Start(authCtx("cust-key"), &common.Backend{
+		Type:   common.BackendType_XRAY,
+		Config: `{"inbounds":[]}`, // ignored for tenant scope
+		Users: []*common.User{
+			{Email: "alice", Proxies: &common.Proxy{Vless: &common.Vless{Id: "11111111-1111-1111-1111-111111111111"}}, Inbounds: []string{"vless-in"}},
+		},
+	}); err != nil {
+		t.Fatalf("tenant Start should succeed, got %v", err)
+	}
+	if got := mgr.TenantUserCount("t1"); got != 1 {
+		t.Fatalf("expected 1 user provisioned for t1, got %d", got)
+	}
+
+	// An unknown key is rejected.
+	if _, err := client.Start(authCtx("bogus"), &common.Backend{Type: common.BackendType_XRAY}); err == nil {
+		t.Fatal("unknown key should be rejected")
 	}
 }
 
@@ -106,7 +137,7 @@ func TestGRPCStartAppliesConfig(t *testing.T) {
 	reg, _ := tenant.NewRegistry(tenant.NewMemStore())
 	mgr := shared.NewManager(cfg, reg)
 	defer mgr.Stop()
-	client := startBufServer(t, New(mgr, "core-secret"))
+	client := startBufServer(t, New(mgr, tenant.NewAuthenticator("master", reg), "core-secret"))
 
 	port := netutil.FindFreePort()
 	xrayCfg := fmt.Sprintf(`{"log":{"loglevel":"warning"},"inbounds":[{"tag":"vless-in","listen":"127.0.0.1","port":%d,"protocol":"vless","settings":{"clients":[],"decryption":"none"}}],"outbounds":[{"tag":"direct","protocol":"freedom"}]}`, port)

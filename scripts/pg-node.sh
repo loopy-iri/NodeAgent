@@ -11,18 +11,12 @@
 set -euo pipefail
 
 # ---------- globals ----------
-APP_NAME="${APP_NAME:-pg-node}"
 GH_REPO="${GH_REPO:-loopy-iri/NodeAgent}"
 BIN_NAME="pg-node-agent"
-BIN_PATH="/usr/local/bin/$BIN_NAME"
-APP_DIR="/opt/$APP_NAME"
-DATA_DIR="/var/lib/$APP_NAME"
-ENV_FILE="$APP_DIR/.env"
-SERVICE_UNIT="/etc/systemd/system/$APP_NAME.service"
-SSL_CERT_FILE="$DATA_DIR/certs/ssl_cert.pem"
-SSL_KEY_FILE="$DATA_DIR/certs/ssl_key.pem"
-FIXED_CONFIG_FILE="$DATA_DIR/fixed-config.json"
-XRAY_DIR="$DATA_DIR/xray-core"
+AUTO_CONFIRM="${AUTO_CONFIRM:-false}"
+# Instance name (overridable with --name) decides paths/service/CLI name, so this
+# can be installed alongside the official pg-node. Defaults to pg-node-agent.
+APP_NAME="pg-node-agent"
 
 # ---------- helpers ----------
 colorized_echo() {
@@ -36,6 +30,21 @@ colorized_echo() {
 die() { colorized_echo red "$1"; exit 1; }
 check_root() { [ "$(id -u)" -eq 0 ] || die "This command must run as root (use sudo)."; }
 require_systemd() { command -v systemctl >/dev/null 2>&1 || die "systemd (systemctl) is required."; }
+
+validate_name() { [[ "$1" =~ ^[A-Za-z0-9][A-Za-z0-9_-]{0,62}$ ]]; }
+
+# set_paths derives all instance paths from APP_NAME.
+set_paths() {
+    APP_DIR="/opt/$APP_NAME"
+    DATA_DIR="/var/lib/$APP_NAME"
+    ENV_FILE="$APP_DIR/.env"
+    SERVICE_UNIT="/etc/systemd/system/$APP_NAME.service"
+    BIN_PATH="$APP_DIR/$BIN_NAME"
+    SSL_CERT_FILE="$DATA_DIR/certs/ssl_cert.pem"
+    SSL_KEY_FILE="$DATA_DIR/certs/ssl_key.pem"
+    FIXED_CONFIG_FILE="$DATA_DIR/fixed-config.json"
+    XRAY_DIR="$DATA_DIR/xray-core"
+}
 
 detect_os() {
     if command -v apt-get >/dev/null 2>&1; then PKG="apt";
@@ -143,7 +152,7 @@ JSON
 }
 
 write_env() {
-    local master="$1" core="$2" http_port="$3" grpc_port="$4"
+    local master="$1" core="$2" http_port="$3" grpc_port="$4" force_inbounds="$5"
     mkdir -p "$APP_DIR"
     umask 077
     cat >"$ENV_FILE" <<EOF
@@ -156,6 +165,9 @@ PG_AGENT_CORE_KEY=$core
 PG_AGENT_TENANT_DB=$DATA_DIR/tenants.bolt
 PG_AGENT_FIXED_CONFIG=$FIXED_CONFIG_FILE
 PG_AGENT_ENFORCE_INTERVAL=10s
+# Apply every customer's users to these inbound tags regardless of what their
+# panel sends (must match a tag in the fixed config above).
+PG_AGENT_FORCE_INBOUNDS=$force_inbounds
 SSL_CERT_FILE=$SSL_CERT_FILE
 SSL_KEY_FILE=$SSL_KEY_FILE
 XRAY_EXECUTABLE_PATH=$XRAY_DIR/xray
@@ -202,13 +214,14 @@ install_node_script() {
 # ---------- commands ----------
 install_command() {
     check_root; require_systemd
-    local master="" core="" http_port="8090" grpc_port="62050" version="latest"
+    local master="" core="" http_port="8090" grpc_port="62050" version="latest" force_inbounds="vless-in"
     while [[ $# -gt 0 ]]; do case "$1" in
         --master-key) master="$2"; shift 2 ;;
         --core-key) core="$2"; shift 2 ;;
         --http-port) http_port="$2"; shift 2 ;;
         --grpc-port) grpc_port="$2"; shift 2 ;;
         --version) version="$2"; shift 2 ;;
+        --force-inbounds) force_inbounds="$2"; shift 2 ;;
         --san-entries) INSTALL_SAN_ENTRIES="$2"; shift 2 ;;
         -y|--yes) shift ;;
         *) die "Unknown install option: $1" ;;
@@ -231,7 +244,7 @@ install_command() {
     [ -x "$XRAY_DIR/xray" ] || install_xray latest
     [ -f "$SSL_CERT_FILE" ] || gen_self_signed_cert
     write_fixed_config
-    write_env "$master" "$core" "$http_port" "$grpc_port"
+    write_env "$master" "$core" "$http_port" "$grpc_port" "$force_inbounds"
     write_service
     install_node_script || true
 
@@ -321,7 +334,25 @@ usage() {
     echo "  --grpc-port PORT   gRPC compat port (default 62050)"
     echo "  --version vX.Y.Z   Install a specific release (default: latest)"
     echo "  --san-entries CSV  Extra cert SANs (e.g. DNS:node.example.com)"
+    echo
+    echo "Global options:"
+    echo "  --name NAME        Instance name (paths/service/CLI). Default: pg-node-agent"
+    echo "  -y, --yes          Non-interactive"
 }
+
+# Parse global flags (--name, -y) anywhere on the line; keep the rest in ARGS.
+ARGS=()
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+    --name) APP_NAME="$2"; shift 2 ;;
+    --name=*) APP_NAME="${1#*=}"; shift ;;
+    -y|--yes) AUTO_CONFIRM=true; shift ;;
+    *) ARGS+=("$1"); shift ;;
+    esac
+done
+set -- "${ARGS[@]+"${ARGS[@]}"}"
+validate_name "$APP_NAME" || die "invalid --name '$APP_NAME' (1-63 chars: letters/digits/_/-, starting alnum)."
+set_paths
 
 cmd="${1:-help}"; shift || true
 case "$cmd" in

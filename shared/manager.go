@@ -28,22 +28,49 @@ import (
 // Manager owns the single shared Xray core and routes per-tenant user
 // operations to it.
 type Manager struct {
-	mu      sync.Mutex
-	cfg     *config.Config
-	reg     *tenant.Registry
-	core    *xray.Xray
-	users   map[string]map[string]*common.User // tenantID -> namespacedEmail -> user
-	emailTo map[string]string                  // namespacedEmail -> tenantID
-	creds   map[string]string                  // credential ("vless:<id>", ...) -> namespacedEmail (owner)
+	mu            sync.Mutex
+	cfg           *config.Config
+	reg           *tenant.Registry
+	core          *xray.Xray
+	users         map[string]map[string]*common.User // tenantID -> namespacedEmail -> user
+	emailTo       map[string]string                  // namespacedEmail -> tenantID
+	creds         map[string]string                  // credential -> namespacedEmail (owner)
+	forceInbounds []string                           // if set, every user is applied to these inbound tags
+	lastSeen      map[string]int64                   // namespacedEmail -> last absolute traffic bytes (for delta accounting)
 }
 
 func NewManager(cfg *config.Config, reg *tenant.Registry) *Manager {
 	return &Manager{
-		cfg:     cfg,
-		reg:     reg,
-		users:   make(map[string]map[string]*common.User),
-		emailTo: make(map[string]string),
-		creds:   make(map[string]string),
+		cfg:      cfg,
+		reg:      reg,
+		users:    make(map[string]map[string]*common.User),
+		emailTo:  make(map[string]string),
+		creds:    make(map[string]string),
+		lastSeen: make(map[string]int64),
+	}
+}
+
+// SetForceInbounds makes every tenant user be applied to the given inbound tags,
+// regardless of the inbound tags the customer's panel sends. This guarantees
+// users land on the node's actual shared inbound(s) even when the external
+// panel's inbound names differ.
+func (m *Manager) SetForceInbounds(tags []string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.forceInbounds = tags
+}
+
+// buildUser returns the namespaced user to apply to the core, honoring
+// force-inbounds when configured.
+func (m *Manager) buildUser(tenantID string, u *common.User) *common.User {
+	inbounds := u.GetInbounds()
+	if len(m.forceInbounds) > 0 {
+		inbounds = m.forceInbounds
+	}
+	return &common.User{
+		Email:    namespacedEmail(tenantID, u.GetEmail()),
+		Proxies:  u.GetProxies(),
+		Inbounds: inbounds,
 	}
 }
 
@@ -132,6 +159,13 @@ func (m *Manager) Started() bool {
 	return m.core != nil && m.core.Started()
 }
 
+// TenantUserCount returns how many users a tenant currently has registered.
+func (m *Manager) TenantUserCount(tenantID string) int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return len(m.users[tenantID])
+}
+
 // Version returns the running core version.
 func (m *Manager) Version() string {
 	m.mu.Lock()
@@ -173,7 +207,7 @@ func (m *Manager) SetTenantUsers(ctx context.Context, tenantID string, users []*
 	newSet := make(map[string]*common.User, len(users))
 	for _, u := range users {
 		ne := namespacedEmail(tenantID, u.GetEmail())
-		newSet[ne] = withEmail(u, ne)
+		newSet[ne] = m.buildUser(tenantID, u)
 	}
 
 	// Enforce credential uniqueness: no duplicates within this batch, and no
@@ -198,6 +232,7 @@ func (m *Manager) SetTenantUsers(ctx context.Context, tenantID string, users []*
 		}
 		_ = m.removeFromCore(ctx, u)
 		delete(m.emailTo, email)
+		delete(m.lastSeen, email)
 		for _, cred := range userCredentials(u) {
 			delete(m.creds, cred)
 		}
@@ -217,6 +252,45 @@ func (m *Manager) SetTenantUsers(ctx context.Context, tenantID string, users []*
 	}
 
 	m.users[tenantID] = newSet
+	return nil
+}
+
+// AddTenantUsers merges users into a tenant's set (add/update) without removing
+// others. Used for incremental SyncUser streams from a customer's panel.
+func (m *Manager) AddTenantUsers(ctx context.Context, tenantID string, users []*common.User) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	tn, ok := m.reg.Get(tenantID)
+	if !ok {
+		return tenant.ErrNotFound
+	}
+	active := tn.Status == tenant.StatusActive
+	prefix := "t" + tenantID + "."
+
+	if m.users[tenantID] == nil {
+		m.users[tenantID] = make(map[string]*common.User)
+	}
+
+	for _, u := range users {
+		nu := m.buildUser(tenantID, u)
+		ne := nu.GetEmail()
+		for _, cred := range userCredentials(nu) {
+			if owner, exists := m.creds[cred]; exists && owner != ne && !strings.HasPrefix(owner, prefix) {
+				return fmt.Errorf("credential already in use by another tenant")
+			}
+		}
+		m.users[tenantID][ne] = nu
+		m.emailTo[ne] = tenantID
+		for _, cred := range userCredentials(nu) {
+			m.creds[cred] = ne
+		}
+		if active && m.core != nil {
+			if err := m.core.SyncUser(ctx, nu); err != nil {
+				return fmt.Errorf("sync user %q: %w", ne, err)
+			}
+		}
+	}
 	return nil
 }
 
@@ -253,6 +327,7 @@ func (m *Manager) DeleteTenant(ctx context.Context, tenantID string) error {
 	}
 	for email, u := range m.users[tenantID] {
 		delete(m.emailTo, email)
+		delete(m.lastSeen, email)
 		for _, cred := range userCredentials(u) {
 			delete(m.creds, cred)
 		}
@@ -272,16 +347,30 @@ func (m *Manager) CollectAndEnforce(ctx context.Context, now int64) error {
 		return nil
 	}
 
+	// Read absolute cumulative per-user counters WITHOUT resetting, so an
+	// external panel (PasarGuard) can also read them. We track the last value
+	// per user and add only the delta to the tenant's usage.
 	resp, err := m.core.GetStats(ctx, &common.StatRequest{
 		Type:   common.StatType_UsersStat,
-		Reset_: true,
+		Reset_: false,
 	})
 	if err == nil && resp != nil {
-		deltas := make(map[string]int64)
+		current := make(map[string]int64)
 		for _, s := range resp.GetStats() {
-			email := s.GetName() // user stat name is the email
+			current[s.GetName()] += s.GetValue() // sum uplink+downlink rows
+		}
+		deltas := make(map[string]int64)
+		for email, total := range current {
+			last := m.lastSeen[email]
+			var delta int64
+			if total >= last {
+				delta = total - last
+			} else {
+				delta = total // core restarted; counters reset to 0
+			}
+			m.lastSeen[email] = total
 			if tid, ok := m.emailTo[email]; ok {
-				deltas[tid] += s.GetValue()
+				deltas[tid] += delta
 			}
 		}
 		for tid, d := range deltas {
@@ -295,6 +384,36 @@ func (m *Manager) CollectAndEnforce(ctx context.Context, now int64) error {
 		m.removeTenantFromCore(ctx, c.Tenant.ID)
 	}
 	return nil
+}
+
+// GetTenantUserStats returns the live per-user stats for a tenant with emails
+// de-namespaced back to their original form, so a customer's panel sees its own
+// user names. Read-only (no reset).
+func (m *Manager) GetTenantUserStats(ctx context.Context, tenantID string) (*common.StatResponse, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	out := &common.StatResponse{}
+	if m.core == nil {
+		return out, nil
+	}
+	resp, err := m.core.GetStats(ctx, &common.StatRequest{Type: common.StatType_UsersStat, Reset_: false})
+	if err != nil || resp == nil {
+		return out, nil
+	}
+	prefix := "t" + tenantID + "."
+	for _, s := range resp.GetStats() {
+		if !strings.HasPrefix(s.GetName(), prefix) {
+			continue
+		}
+		out.Stats = append(out.Stats, &common.Stat{
+			Name:  strings.TrimPrefix(s.GetName(), prefix),
+			Type:  s.GetType(),
+			Link:  s.GetLink(),
+			Value: s.GetValue(),
+		})
+	}
+	return out, nil
 }
 
 // --- internal helpers (callers hold m.mu) ---
@@ -331,14 +450,6 @@ func (m *Manager) removeFromCore(ctx context.Context, u *common.User) error {
 
 func namespacedEmail(tenantID, email string) string {
 	return "t" + tenantID + "." + email
-}
-
-func withEmail(u *common.User, email string) *common.User {
-	return &common.User{
-		Email:    email,
-		Proxies:  u.GetProxies(),
-		Inbounds: u.GetInbounds(),
-	}
 }
 
 func withInbounds(u *common.User, inbounds []string) *common.User {

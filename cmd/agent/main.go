@@ -26,6 +26,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -45,6 +46,7 @@ func main() {
 	enforceInterval := envDuration("PG_AGENT_ENFORCE_INTERVAL", 10*time.Second)
 	coreKey := os.Getenv("PG_AGENT_CORE_KEY")
 	grpcAddr := env("PG_AGENT_GRPC_ADDR", ":62050")
+	forceInbounds := splitCSV(os.Getenv("PG_AGENT_FORCE_INBOUNDS"))
 
 	if masterKey == "" {
 		log.Fatal("PG_AGENT_MASTER_KEY is required")
@@ -67,6 +69,7 @@ func main() {
 	}
 
 	mgr := shared.NewManager(nodeCfg, reg)
+	mgr.SetForceInbounds(forceInbounds)
 	authn := tenant.NewAuthenticator(masterKey, reg)
 	srv := agent.NewServer(reg, mgr, authn)
 
@@ -105,7 +108,7 @@ func main() {
 		if err != nil {
 			log.Fatalf("load tls for grpc: %v", err)
 		}
-		stopGRPC, err = grpccompat.Serve(tlsConfig, grpcAddr, grpccompat.New(mgr, coreKey))
+		stopGRPC, err = grpccompat.Serve(tlsConfig, grpcAddr, grpccompat.New(mgr, authn, coreKey))
 		if err != nil {
 			log.Fatalf("start grpc compat: %v", err)
 		}
@@ -158,4 +161,14 @@ func envDuration(key string, fallback time.Duration) time.Duration {
 		}
 	}
 	return fallback
+}
+
+func splitCSV(s string) []string {
+	var out []string
+	for _, p := range strings.Split(s, ",") {
+		if p = strings.TrimSpace(p); p != "" {
+			out = append(out, p)
+		}
+	}
+	return out
 }
