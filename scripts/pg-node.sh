@@ -12,6 +12,7 @@ set -euo pipefail
 
 # ---------- globals ----------
 GH_REPO="${GH_REPO:-loopy-iri/NodeAgent}"
+RAW_SCRIPT_URL="${RAW_SCRIPT_URL:-https://raw.githubusercontent.com/${GH_REPO}/main/scripts/pg-node.sh}"
 BIN_NAME="pg-node-agent"
 AUTO_CONFIRM="${AUTO_CONFIRM:-false}"
 # Instance name (overridable with --name) decides paths/service/CLI name, so this
@@ -211,6 +212,18 @@ install_node_script() {
     fi
 }
 
+# self_update_script refreshes the installed CLI itself from GitHub so script
+# improvements (not just the binary) reach already-installed hosts on `update`.
+self_update_script() {
+    local dest="/usr/local/bin/$APP_NAME"
+    [ -f "$dest" ] || return 0
+    local tmp; tmp="$(mktemp)"
+    if curl -fsSL "$RAW_SCRIPT_URL" -o "$tmp" 2>/dev/null && [ -s "$tmp" ]; then
+        install -m 755 "$tmp" "$dest" && colorized_echo green "✓ CLI script refreshed: $dest"
+    fi
+    rm -f "$tmp"
+}
+
 # ---------- commands ----------
 install_command() {
     check_root; require_systemd
@@ -273,6 +286,7 @@ edit_command()    { require_installed; "${EDITOR:-nano}" "$FIXED_CONFIG_FILE"; c
 
 update_command() {
     check_root; require_installed; detect_arch
+    self_update_script
     local version="${1:-latest}" tag
     tag="$version"; [ "$version" = "latest" ] && tag="$(latest_tag)"
     download_binary "$tag"
