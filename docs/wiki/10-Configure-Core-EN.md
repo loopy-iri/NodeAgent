@@ -14,7 +14,12 @@ This explains exactly how you, the **operator/seller**, configure the node's Xra
 ## Three ways to set the config
 
 ### Way 1 — web panel (simplest)
-`http://PANEL_IP:8080/` → **Nodes** → click **"Config"** on the node → edit the JSON → **"Apply to node"**. The core restarts and active customers' users are reapplied.
+`http://PANEL_IP:8080/` → **Nodes** → click **"Details"** on the node → from there you can:
+- View/edit/apply the **Xray config** (ready-made templates included).
+- **Start / Restart / Stop the core** (like a normal PasarGuard node).
+- **Switch the Xray version** (enter a version or `latest`; the node downloads it and restarts the core).
+- **Update the node** (pulls the latest node binary and restarts the service — like the script).
+- Copy the master key / core key / certificate / addresses, or change them via **"Edit node"**.
 
 ### Way 2 — panel API
 ```bash

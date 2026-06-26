@@ -15,6 +15,14 @@ Specific version:
 sudo pg-node-agent update v0.4.2
 ```
 
+## Update & manage the core from the web panel (no SSH)
+Since node v0.5.0 and panel v0.6.0, from **Panel → Nodes → Details** you can, without SSH:
+- **Start / restart / stop** the core,
+- **Switch the Xray version** (the node downloads it and restarts),
+- **Update the node binary** (like running the script).
+
+> Note: "update node from the panel" only works for nodes already on **v0.5.0+**. Update a node once with the script the first time (`sudo pg-node-agent update`); afterwards the panel button works too.
+
 > If your installed version is older than v0.2.1 (no self-update yet), refresh the script **once** by re-running `install` (keys/data are preserved):
 > ```bash
 > sudo bash -c "$(curl -sL https://raw.githubusercontent.com/loopy-iri/NodeAgent/main/scripts/pg-node.sh)" @ install
