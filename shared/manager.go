@@ -191,6 +191,25 @@ func (m *Manager) Config() string {
 	return m.config
 }
 
+// RestartCore re-applies the currently running config (stop + start + re-add
+// active tenants' users). Returns an error if no config has been set yet.
+func (m *Manager) RestartCore(ctx context.Context) error {
+	m.mu.Lock()
+	cfg := m.config
+	m.mu.Unlock()
+	if cfg == "" {
+		return fmt.Errorf("no config to (re)start; push a config first")
+	}
+	return m.ApplyConfig(ctx, cfg)
+}
+
+// XrayExecutablePath returns the path of the Xray binary the core runs.
+func (m *Manager) XrayExecutablePath() string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.cfg.XrayExecutablePath
+}
+
 // SharableInbounds returns a {"inbounds":[...]} JSON document containing only the
 // inbound definitions a customer needs to replicate the node's connection in
 // their own panel. When force-inbounds is set, only those tags are returned.

@@ -186,6 +186,8 @@ SSL_CERT_FILE=$SSL_CERT_FILE
 SSL_KEY_FILE=$SSL_KEY_FILE
 XRAY_EXECUTABLE_PATH=$XRAY_DIR/xray
 XRAY_ASSETS_PATH=$XRAY_DIR
+# Used by the self-update endpoint to restart the right systemd unit.
+PG_AGENT_SERVICE_NAME=$APP_NAME
 EOF
     umask 022
     colorized_echo green "✓ Wrote $ENV_FILE"
